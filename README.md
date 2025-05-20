@@ -1,15 +1,9 @@
-# List of WiFi networks for ESP32-S3-BOX
+# List of WiFi networks examples for ESP32
 
-Simple application which lists available networks.
+The application for ESP32 which demonstrates how to list WiFi using different technologies.
 
-## Set up the build environment
-idf.py set-target esp32s3
+## Examples
 
-## Build the project
-idf.py build
+* esp32-s3-box-3-esp-idf - ESP32-S3-BOX-3 with ESP-IDF implementation
+* esp32-s3-rust-std - ESP32-S3 with Rust std (using ESP-IDF v5.3)
 
-## Flash the project to your ESP32-S3
-idf.py -p /dev/ttyUSB0 flash
-
-## Monitor the serial output
-idf.py monitor
