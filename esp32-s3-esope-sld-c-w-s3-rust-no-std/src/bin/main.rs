@@ -192,7 +192,7 @@ fn main() -> ! {
         .with_data14(peripherals.GPIO19)
         .with_data15(peripherals.GPIO12);
 
-    static mut LINE_BUF: [Rgb565; 320] = [Rgb565::BLUE; 320];
+    static mut LINE_BUF: [Rgb565; 320*2] = [Rgb565::BLUE; 320*2];
 
     info!("Entering main loop...");
     // Prepare DMA transaction for line streaming
@@ -201,9 +201,9 @@ fn main() -> ! {
 
     loop {
         info!("Drawing frame...");
-        for y in 0..display_height {
+        // for y in 0..display_height {
             // Simple test pattern: alternating red/blue scanlines
-            let color = if y % 2 == 0 { Rgb565::RED } else { Rgb565::BLUE };
+            let color =  Rgb565::BLUE ;
             // Fill the line buffer
             for pixel in unsafe { &mut LINE_BUF } {
                 *pixel = color;
@@ -233,7 +233,7 @@ fn main() -> ! {
                     dma_tx = new_tx;
                 }
             }
-        }
+        // }
     }
 
     // Main loop to draw the entire image
