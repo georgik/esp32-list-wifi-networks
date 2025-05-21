@@ -27,13 +27,15 @@ use embedded_graphics_framebuf::backends::FrameBufferBackend;
 use esp_hal::clock::CpuClock;
 use esp_hal::main;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::i2c::master::I2c;
+use eeprom24x::{Eeprom24x, SlaveAddr};
 use log::info;
 
 // DMA line‐buffer for parallel RGB (1 descriptor, up to 4095 bytes each)
 use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
 #[link_section = ".dma"]
 static mut LINE_DESCRIPTOR: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
-static mut LINE_BYTES: [u8; (LCD_H_RES as usize) * 2] = [0; (LCD_H_RES as usize) * 2];
+static mut LINE_BYTES: [u8; 320 * 2] = [0; 320 * 2];
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -41,11 +43,6 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 extern crate alloc;
-
-const LCD_H_RES: u16 = 320;
-const LCD_V_RES: u16 = 240;
-const LCD_BUFFER_SIZE: usize = 320 * 240;
-
 
 /// A wrapper around a boxed array that implements FrameBufferBackend.
 pub struct HeapBuffer<C: PixelColor, const N: usize>(Box<[C; N]>);
@@ -95,6 +92,21 @@ fn main() -> ! {
     init_logger_from_env();
     esp_alloc::heap_allocator!(size: 72 * 1024);
 
+    // Read display dimensions from EEPROM
+    let mut i2c_bus = I2c::new(
+        peripherals.I2C0,
+        esp_hal::i2c::master::Config::default()
+    )
+    .unwrap()
+    .with_sda(peripherals.GPIO1)
+    .with_scl(peripherals.GPIO41);
+    let mut eeid = [0u8; 0x1c];
+    let mut eeprom = Eeprom24x::new_24x01(i2c_bus, SlaveAddr::default());
+    eeprom.read_data(0x00, &mut eeid).unwrap();
+    let display_width = u16::from_be_bytes([eeid[8], eeid[9]]) as usize;
+    let display_height = u16::from_be_bytes([eeid[10], eeid[11]]) as usize;
+    info!("Display size from EEPROM: {}x{}", display_width, display_height);
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let _init = esp_wifi::init(
         timg0.timer0,
@@ -110,8 +122,8 @@ fn main() -> ! {
     let mut panel_enable = Output::new(peripherals.GPIO42, Level::Low, OutputConfig::default());
     // some boards require LOW→HIGH pulse, or just HIGH
     panel_enable.set_high();
-    
-    
+
+
     // Initialize the parallel‐RGB display via DPI
     // let mut display = init_display(peripherals);
     // --- Initialize parallel‐RGB display via DPI inline ---
@@ -129,8 +141,8 @@ fn main() -> ! {
             ..Default::default()
         })
         .with_timing(FrameTiming {
-            horizontal_active_width: 480,
-            vertical_active_height: 480,
+            horizontal_active_width: display_width,
+            vertical_active_height: display_height,
             horizontal_total_width: 600,
             horizontal_blank_front_porch: 80,
             vertical_total_height: 600,
@@ -169,7 +181,7 @@ fn main() -> ! {
         .with_data14(peripherals.GPIO19)
         .with_data15(peripherals.GPIO12);
 
-    static mut LINE_BUF: [Rgb565; LCD_H_RES as usize] = [Rgb565::BLUE; LCD_H_RES as usize];
+    static mut LINE_BUF: [Rgb565; 320] = [Rgb565::BLUE; 320];
 
     info!("Entering main loop...");
     // Prepare DMA transaction for line streaming
@@ -178,7 +190,7 @@ fn main() -> ! {
 
     loop {
         info!("Drawing frame...");
-        for y in 0..LCD_V_RES {
+        for y in 0..display_height {
             // Simple test pattern: alternating red/blue scanlines
             let color = if y % 2 == 0 { Rgb565::RED } else { Rgb565::BLUE };
             // Fill the line buffer
@@ -186,7 +198,7 @@ fn main() -> ! {
                 *pixel = color;
             }
             // fill LINE_BYTES from LINE_BUF
-            for x in 0..(LCD_H_RES as usize) {
+            for x in 0..display_width {
                 let color: Rgb565 = unsafe { LINE_BUF[x] };
                 let [lo, hi] = color.into_storage().to_le_bytes();
                 unsafe {
