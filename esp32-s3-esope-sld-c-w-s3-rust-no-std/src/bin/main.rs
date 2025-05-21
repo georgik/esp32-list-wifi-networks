@@ -2,14 +2,17 @@
 #![no_main]
 
 use esp_hal::peripherals::*;
-use mipidsi::Builder as DisplayBuilder;
-use mipidsi::models::ST7789;
 use esp_hal::gpio::*;
-use embedded_hal_bus::spi::ExclusiveDevice;
+use esp_hal::gpio::Level;
+use esp_hal::delay::Delay;
+use esp_hal::time::Rate;
+use esp_hal::lcd_cam::{LcdCam, lcd::{Dpi, Config as DpiConfig, FrameTiming, Format, ClockMode, Polarity, Phase}};
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics_framebuf::backends::FrameBufferBackend;
+use embedded_graphics_framebuf::FrameBuf;
 
 use esp_hal::clock::CpuClock;
 use esp_hal::main;
-use esp_hal::spi::master::Spi;
 use esp_hal::time::{Duration, Instant};
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
@@ -22,9 +25,6 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 extern crate alloc;
 
 use slint::SharedString;
-// use esope_board::init_display;
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::*;
 
 #[main]
 fn main() -> ! {
@@ -41,19 +41,9 @@ fn main() -> ! {
     )
     .unwrap();
 
-    // Init board/display
-    let mut display = init_display(
-        peripherals.GPIO,
-        peripherals.I2C0,
-        peripherals.SPI2,
-        peripherals.DMA,
-        peripherals.PIN_CTRL,
-        peripherals.LCD_CAM,
-        peripherals.RMT,
-        peripherals.TIMG1,
-    );
-
-    // Show some dummy screen before Slint UI is ready
+    // Initialize the parallel‐RGB display via DPI
+    let mut display = init_display(peripherals);
+    // Clear to black
     display.clear(Rgb565::BLACK).unwrap();
 
     // Initialize Slint runtime
@@ -65,50 +55,69 @@ fn main() -> ! {
     loop {}
 }
 
-fn init_display(
-    gpio: GPIO,
-    i2c0: I2C0,
-    spi2: SPI2,
-    dma: DMA,
-    pin_ctrl: PIN_CTRL,
-    lcd_cam: LCD_CAM,
-    rmt: RMT,
-    timg1: TIMG1,
-) -> mipidsi::Display<
-    mipidsi::models::ST7789,
-    SPIInterfaceNoCS<
-        Spi<SPI2, (Gpio6<Output<PushPull>>, Gpio7<Output<PushPull>>, Gpio8<Output<PushPull>>)>,
-        Gpio10<Output<PushPull>>
-    >,
-    Gpio9<Output<PushPull>>
+fn init_display(peripherals: Peripherals) -> Dpi<
+    LcdCam<esp_hal::peripherals::LCD_CAM>,
+    esp_hal::peripherals::DMA_CH2,
+    Rgb565,
 > {
-    let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
-    let rst = Output::new(peripherals.GPIO9, Level::Low, OutputConfig::default());
+    // Delay for init
+    let mut delay = Delay::new(&peripherals.TIMG1);
 
-    let spi = Spi::<Blocking>::new(
-        spi2,
-        esp_hal::spi::master::Config::default()
-            .with_frequency(Rate::from_mhz(40))
-            .with_mode(esp_hal::spi::Mode::_0),
-    )
-        .unwrap()
-        .with_sck(peripherals.GPIO6)
-        .with_mosi(peripherals.GPIO7)
-        .with_dma(dma.ch0);
-    let cs_output = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
-    let spi_delay = esp_hal::delay::Delay::new(&timg1);
-    let spi_device = ExclusiveDevice::new(spi, cs_output, spi_delay).unwrap();
+    // Create the LCD controller
+    let lcd = LcdCam::new(peripherals.LCD_CAM);
 
-    let di = SPIInterfaceNoCS::new(spi_device, dc);
+    // Build DPI config
+    let config = DpiConfig::default()
+        .with_clock_mode(ClockMode {
+            polarity: Polarity::IdleLow,
+            phase: Phase::ShiftLow,
+        })
+        .with_frequency(Rate::from_mhz(10))
+        .with_format(Format {
+            enable_2byte_mode: true,
+            ..Default::default()
+        })
+        .with_timing(FrameTiming {
+            horizontal_active_width: 480,
+            vertical_active_height: 480,
+            horizontal_total_width: 600,
+            horizontal_blank_front_porch: 80,
+            vertical_total_height: 600,
+            vertical_blank_front_porch: 80,
+            hsync_width: 10,
+            vsync_width: 4,
+            hsync_position: 10,
+        })
+        .with_vsync_idle_level(Level::High)
+        .with_hsync_idle_level(Level::High)
+        .with_de_idle_level(Level::Low)
+        .with_disable_black_region(false);
 
-    let mut delay = esp_hal::delay::Delay::new(&timg1);
+    // Initialize the DPI interface
+    let mut dpi = Dpi::new(lcd, peripherals.DMA_CH2, config).unwrap()
+        .with_vsync(peripherals.GPIO6)
+        .with_hsync(peripherals.GPIO15)
+        .with_de(peripherals.GPIO5)
+        .with_pclk(peripherals.GPIO4)
+        // Blue bus
+        .with_data0(peripherals.GPIO9)
+        .with_data1(peripherals.GPIO17)
+        .with_data2(peripherals.GPIO46)
+        .with_data3(peripherals.GPIO16)
+        .with_data4(peripherals.GPIO7)
+        // Green bus
+        .with_data5(peripherals.GPIO8)
+        .with_data6(peripherals.GPIO21)
+        .with_data7(peripherals.GPIO3)
+        .with_data8(peripherals.GPIO11)
+        .with_data9(peripherals.GPIO18)
+        .with_data10(peripherals.GPIO10)
+        // Red bus
+        .with_data11(peripherals.GPIO14)
+        .with_data12(peripherals.GPIO20)
+        .with_data13(peripherals.GPIO13)
+        .with_data14(peripherals.GPIO19)
+        .with_data15(peripherals.GPIO12);
 
-    let mut display = DisplayBuilder::new(ST7789, di)
-        .with_display_size(240, 320)
-        .with_invert_colors(mipidsi::ColorInversion::Inverted)
-        .init(&mut delay, Some(rst))
-        .unwrap();
-
-    display.set_orientation(mipidsi::Orientation::Portrait).unwrap();
-    display
+    dpi
 }
