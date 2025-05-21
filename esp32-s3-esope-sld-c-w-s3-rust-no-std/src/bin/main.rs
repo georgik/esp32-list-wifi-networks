@@ -130,26 +130,37 @@ fn main() -> ! {
     // let mut delay = Delay::new(&peripherals.TIMG1);
     let lcd_cam = LcdCam::new(peripherals.LCD_CAM);
 
+    let pclk_hz = ((eeid[12] as u32) * 1_000_000 + (eeid[13] as u32) * 100_000).min(13_600_000);
+    let h_res = display_width;
+    let v_res = display_height;
+    let hsync_pulse = eeid[17] as u32;
+    let hsync_back  = u16::from_be_bytes([eeid[15], eeid[16]]) as u32;
+    let hsync_front = u16::from_be_bytes([eeid[18], eeid[19]]) as u32;
+    let vsync_pulse = eeid[22] as usize;
+    let vsync_back  = u16::from_be_bytes([eeid[20], eeid[21]]);
+    let vsync_front = u16::from_be_bytes([eeid[23], eeid[24]]) as u32;
+
     let dpi_config = DpiConfig::default()
         .with_clock_mode(ClockMode {
             polarity: Polarity::IdleLow,
-            phase: Phase::ShiftLow,
+            phase:    Phase::ShiftLow,
         })
-        .with_frequency(Rate::from_mhz(10))
+        .with_frequency(Rate::from_hz(pclk_hz))
         .with_format(Format {
             enable_2byte_mode: true,
             ..Default::default()
         })
         .with_timing(FrameTiming {
-            horizontal_active_width: display_width,
-            vertical_active_height: display_height,
-            horizontal_total_width: 600,
-            horizontal_blank_front_porch: 80,
-            vertical_total_height: 600,
-            vertical_blank_front_porch: 80,
-            hsync_width: 10,
-            vsync_width: 4,
-            hsync_position: 10,
+            horizontal_active_width:   h_res,
+            vertical_active_height:    v_res,
+            horizontal_total_width:    h_res + hsync_back as usize + hsync_front as usize,
+            horizontal_blank_front_porch: hsync_front as usize,
+            vertical_total_height:     v_res + vsync_back as usize + vsync_front as usize,
+            vertical_blank_front_porch:   vsync_front as usize,
+            hsync_width:               hsync_pulse as usize,
+            vsync_width:               vsync_pulse,
+            // start of HSYNC pulse relative to start of line = back porch
+            hsync_position:            hsync_back as usize,
         })
         .with_vsync_idle_level(Level::High)
         .with_hsync_idle_level(Level::High)
