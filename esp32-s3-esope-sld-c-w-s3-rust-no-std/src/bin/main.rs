@@ -13,12 +13,26 @@ use esp_hal::lcd_cam::{
         dpi::{Config as DpiConfig, Dpi, Format, FrameTiming},
     },
 };
-use embedded_graphics::pixelcolor::Rgb565;
+use alloc::boxed::Box;
+use embedded_graphics::{
+    Drawable,
+    pixelcolor::Rgb565,
+    prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
+};
+use embedded_graphics_framebuf::FrameBuf;
+use embedded_graphics_framebuf::backends::FrameBufferBackend;
 
 use esp_hal::clock::CpuClock;
 use esp_hal::main;
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
+
+// DMA line‐buffer for parallel RGB (1 descriptor, up to 4095 bytes each)
+use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
+#[link_section = ".dma"]
+static mut LINE_DESCRIPTOR: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
+static mut LINE_BYTES: [u8; (LCD_H_RES as usize) * 2] = [0; (LCD_H_RES as usize) * 2];
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -27,12 +41,55 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 extern crate alloc;
 
-// use slint::SharedString;
+const LCD_H_RES: u16 = 320;
+const LCD_V_RES: u16 = 240;
+const LCD_BUFFER_SIZE: usize = 320 * 240;
+
+
+/// A wrapper around a boxed array that implements FrameBufferBackend.
+pub struct HeapBuffer<C: PixelColor, const N: usize>(Box<[C; N]>);
+
+impl<C: PixelColor, const N: usize> HeapBuffer<C, N> {
+    pub fn new(data: Box<[C; N]>) -> Self {
+        Self(data)
+    }
+
+    pub fn as_slice(&self) -> &[C] {
+        self.0.as_ref()
+    }
+}
+
+impl<C: PixelColor, const N: usize> core::ops::Deref for HeapBuffer<C, N> {
+    type Target = [C; N];
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl<C: PixelColor, const N: usize> core::ops::DerefMut for HeapBuffer<C, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
+}
+
+impl<C: PixelColor, const N: usize> FrameBufferBackend for HeapBuffer<C, N> {
+    type Color = C;
+    fn set(&mut self, index: usize, color: Self::Color) {
+        self.0[index] = color;
+    }
+    fn get(&self, index: usize) -> Self::Color {
+        self.0[index]
+    }
+    fn nr_elements(&self) -> usize {
+        N
+    }
+}
 
 #[main]
 fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    // esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
     init_logger_from_env();
     esp_alloc::heap_allocator!(size: 72 * 1024);
@@ -79,7 +136,7 @@ fn main() -> ! {
         .with_de_idle_level(Level::Low)
         .with_disable_black_region(false);
 
-    let mut display = Dpi::new(lcd_cam.lcd, peripherals.DMA_CH2, dpi_config).unwrap()
+    let mut dpi = Dpi::new(lcd_cam.lcd, peripherals.DMA_CH2, dpi_config).unwrap()
         .with_vsync(peripherals.GPIO6)
         .with_hsync(peripherals.GPIO15)
         .with_de(peripherals.GPIO5)
@@ -104,16 +161,77 @@ fn main() -> ! {
         .with_data14(peripherals.GPIO19)
         .with_data15(peripherals.GPIO12);
 
-    // display.clear(Rgb565::BLACK).unwrap();
-
-    // Initialize Slint runtime
-    // slint::platform::init(Default::default()).unwrap();
-
-    // let main_window = wifi_list::MainWindow::new().unwrap();
-    // main_window.run().unwrap();
+    static mut LINE_BUF: [Rgb565; LCD_H_RES as usize] = [Rgb565::BLUE; LCD_H_RES as usize];
 
     info!("Entering main loop...");
-    loop {}
+    // Prepare DMA transaction for line streaming
+    let mut dma_tx: DmaTxBuf =
+        unsafe { DmaTxBuf::new(&mut LINE_DESCRIPTOR, &mut LINE_BYTES).unwrap() };
+
+    loop {
+        for y in 0..LCD_V_RES {
+            // Simple test pattern: alternating red/blue scanlines
+            let color = if y % 2 == 0 { Rgb565::RED } else { Rgb565::BLUE };
+            // Fill the line buffer
+            for pixel in unsafe { &mut LINE_BUF } {
+                *pixel = color;
+            }
+            // fill LINE_BYTES from LINE_BUF
+            for x in 0..(LCD_H_RES as usize) {
+                let color: Rgb565 = unsafe { LINE_BUF[x] };
+                let [lo, hi] = color.into_storage().to_le_bytes();
+                unsafe {
+                    LINE_BYTES[2 * x] = lo;
+                    LINE_BYTES[2 * x + 1] = hi;
+                }
+            }
+            // send this scanline via DPI+DMA
+            match dpi.send(false, dma_tx) {
+                Ok(xfer) => {
+                    let (res, new_dpi, new_tx) = xfer.wait();
+                    dpi = new_dpi;
+                    dma_tx = new_tx;
+                    if let Err(e) = res {
+                        info!("DMA error: {:?}", e);
+                    }
+                }
+                Err((e, new_dpi, new_tx)) => {
+                    info!("DMA send error: {:?}", e);
+                    dpi = new_dpi;
+                    dma_tx = new_tx;
+                }
+            }
+        }
+    }
+
+    // Main loop to draw the entire image
+    // loop {
+    //
+    //     // Pack entire frame into PSRAM DMA buffer
+    //     let dst = dma_tx.as_mut_slice();
+    //     for (i, px) in frame_buf.data.iter().enumerate() {
+    //         let [lo, hi] = px.into_storage().to_le_bytes();
+    //         dst[2 * i] = lo;
+    //         dst[2 * i + 1] = hi;
+    //     }
+    //
+    //     // One-shot transfer
+    //     match dpi.send(false, dma_tx) {
+    //         Ok(xfer) => {
+    //             let (res, dpi2, buf2) = xfer.wait();
+    //             dpi = dpi2;
+    //             dma_tx = buf2;
+    //             if let Err(e) = res {
+    //                 error!("DMA error: {:?}", e);
+    //             }
+    //         }
+    //         Err((e, dpi2, buf2)) => {
+    //             error!("DMA send error: {:?}", e);
+    //             dpi = dpi2;
+    //             dma_tx = buf2;
+    //         }
+    //     }
+    // }
 }
 
 // fn init_display<'d>(peripherals: Peripherals) -> Dpi<

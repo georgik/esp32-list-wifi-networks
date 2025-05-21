@@ -17,7 +17,7 @@ embassy-net = { version = "0.6.0", features = [
 ] }
 embedded-io = "0.6.1"
 esp-alloc = "0.7.0"
-esp-hal = { version = "1.0.0-beta.0", features = ["esp32s3", "unstable"] }
+esp-hal = { version = "1.0.0-beta.0", features = ["esp32s3", "unstable", "psram"] }
 esp-wifi = { version = "0.13.0", features = [
   "builtin-scheduler",
   "esp-alloc",
