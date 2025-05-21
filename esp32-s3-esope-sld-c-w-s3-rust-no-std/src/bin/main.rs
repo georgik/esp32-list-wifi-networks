@@ -13,6 +13,7 @@ use esp_hal::lcd_cam::{
         dpi::{Config as DpiConfig, Dpi, Format, FrameTiming},
     },
 };
+use esp_hal::gpio::{Output, OutputConfig};
 use alloc::boxed::Box;
 use embedded_graphics::{
     Drawable,
@@ -104,6 +105,13 @@ fn main() -> ! {
 
 
     info!("Initializing display...");
+
+    // Panel‐enable / backlight
+    let mut panel_enable = Output::new(peripherals.GPIO42, Level::Low, OutputConfig::default());
+    // some boards require LOW→HIGH pulse, or just HIGH
+    panel_enable.set_high();
+    
+    
     // Initialize the parallel‐RGB display via DPI
     // let mut display = init_display(peripherals);
     // --- Initialize parallel‐RGB display via DPI inline ---
@@ -169,6 +177,7 @@ fn main() -> ! {
         unsafe { DmaTxBuf::new(&mut LINE_DESCRIPTOR, &mut LINE_BYTES).unwrap() };
 
     loop {
+        info!("Drawing frame...");
         for y in 0..LCD_V_RES {
             // Simple test pattern: alternating red/blue scanlines
             let color = if y % 2 == 0 { Rgb565::RED } else { Rgb565::BLUE };
