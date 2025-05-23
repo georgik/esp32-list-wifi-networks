@@ -29,16 +29,20 @@ use esp_hal::main;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::i2c::master::I2c;
 use eeprom24x::{Eeprom24x, SlaveAddr};
-use log::info;
+use log::{error, info};
 
 // DMA line‐buffer for parallel RGB (1 descriptor, up to 4095 bytes each)
 use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
+use esp_println::println;
+
 #[link_section = ".dma"]
 static mut LINE_DESCRIPTOR: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
-static mut LINE_BYTES: [u8; 320 * 2] = [0; 320 * 2];
+static mut LINE_BYTES: [u8; 320 * 10 * 2] = [0; 320 * 10 * 2];
+static mut LINE_BUF: [Rgb565; 320 * 10] = [Rgb565::BLUE; 320 * 10];
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    error!("Panic: {}", _info);
     loop {}
 }
 
@@ -87,10 +91,12 @@ impl<C: PixelColor, const N: usize> FrameBufferBackend for HeapBuffer<C, N> {
 fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    // esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+    println!("Starting up...");
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+    println!("PSRAM allocator initialized");
 
     init_logger_from_env();
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    // esp_alloc::heap_allocator!(size: 72 * 1024);
 
     // Read display dimensions from EEPROM
     let mut i2c_bus = I2c::new(
@@ -107,13 +113,13 @@ fn main() -> ! {
     let display_height = u16::from_be_bytes([eeid[10], eeid[11]]) as usize;
     info!("Display size from EEPROM: {}x{}", display_width, display_height);
 
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let _init = esp_wifi::init(
-        timg0.timer0,
-        esp_hal::rng::Rng::new(peripherals.RNG),
-        peripherals.RADIO_CLK,
-    )
-    .unwrap();
+    // let timg0 = TimerGroup::new(peripherals.TIMG0);
+    // let _init = esp_wifi::init(
+    //     timg0.timer0,
+    //     esp_hal::rng::Rng::new(peripherals.RNG),
+    //     peripherals.RADIO_CLK,
+    // )
+    // .unwrap();
 
 
     info!("Initializing display...");
@@ -192,48 +198,44 @@ fn main() -> ! {
         .with_data14(peripherals.GPIO19)
         .with_data15(peripherals.GPIO12);
 
-    static mut LINE_BUF: [Rgb565; 320*2] = [Rgb565::BLUE; 320*2];
-
     info!("Entering main loop...");
     // Prepare DMA transaction for line streaming
     let mut dma_tx: DmaTxBuf =
         unsafe { DmaTxBuf::new(&mut LINE_DESCRIPTOR, &mut LINE_BYTES).unwrap() };
 
     loop {
-        info!("Drawing frame...");
-        // for y in 0..display_height {
-            // Simple test pattern: alternating red/blue scanlines
-            let color =  Rgb565::BLUE ;
-            // Fill the line buffer
-            for pixel in unsafe { &mut LINE_BUF } {
-                *pixel = color;
+        info!("Drawing 10 lines...");
+
+        // Fill LINE_BUF with a test pattern
+        for pixel in unsafe { &mut LINE_BUF } {
+            *pixel = Rgb565::BLUE;
+        }
+
+        // Convert LINE_BUF to LINE_BYTES
+        for (i, pixel) in unsafe { LINE_BUF.iter().enumerate() } {
+            let [lo, hi] = pixel.into_storage().to_le_bytes();
+            unsafe {
+                LINE_BYTES[2 * i] = lo;
+                LINE_BYTES[2 * i + 1] = hi;
             }
-            // fill LINE_BYTES from LINE_BUF
-            for x in 0..display_width {
-                let color: Rgb565 = unsafe { LINE_BUF[x] };
-                let [lo, hi] = color.into_storage().to_le_bytes();
-                unsafe {
-                    LINE_BYTES[2 * x] = lo;
-                    LINE_BYTES[2 * x + 1] = hi;
+        }
+
+        // Send these lines via DPI+DMA
+        match dpi.send(false, dma_tx) {
+            Ok(xfer) => {
+                let (res, new_dpi, new_tx) = xfer.wait();
+                dpi = new_dpi;
+                dma_tx = new_tx;
+                if let Err(e) = res {
+                    info!("DMA error: {:?}", e);
                 }
             }
-            // send this scanline via DPI+DMA
-            match dpi.send(false, dma_tx) {
-                Ok(xfer) => {
-                    let (res, new_dpi, new_tx) = xfer.wait();
-                    dpi = new_dpi;
-                    dma_tx = new_tx;
-                    if let Err(e) = res {
-                        info!("DMA error: {:?}", e);
-                    }
-                }
-                Err((e, new_dpi, new_tx)) => {
-                    info!("DMA send error: {:?}", e);
-                    dpi = new_dpi;
-                    dma_tx = new_tx;
-                }
+            Err((e, new_dpi, new_tx)) => {
+                info!("DMA send error: {:?}", e);
+                dpi = new_dpi;
+                dma_tx = new_tx;
             }
-        // }
+        }
     }
 
     // Main loop to draw the entire image
