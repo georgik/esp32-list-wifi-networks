@@ -120,11 +120,18 @@ fn main() -> ! {
 
     // Allocate PSRAM buffer for full frame
     let buf_box: Box<[u8; FRAME_BYTES]> = Box::new([0; FRAME_BYTES]);
+    // Box::leak turns it into a &'static mut [u8]
     let psram_buf: &'static mut [u8] = Box::leak(buf_box);
 
-    // Prepare full-frame DMA transaction
+    // Tie to descriptor set for one-shot DMA
     let mut dma_tx: DmaTxBuf =
-        unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
+        unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS[..], psram_buf).unwrap() };
+
+    // Allocate 4‐line pixel buffer in PSRAM
+    const LINES: usize = 4;
+    const line_len:usize = 320 * LINES;
+    let line_pixels_box: Box<[Rgb565; line_len]> = Box::new([Rgb565::BLACK; line_len]);
+    let line_pixels: &'static mut [Rgb565; line_len] = Box::leak(line_pixels_box);
 
     info!("Initializing display...");
 
@@ -227,21 +234,18 @@ fn main() -> ! {
     info!("Entering main loop...");
     loop {
         info!("Drawing 4 lines now...");
-        // Fill each of the four lines with a distinct color
-        // Line 0: Blue, Line 1: Red, Line 2: Green, Line 3: White
-        static mut LINE_BUF: [Rgb565; 320 * 4] = [Rgb565::BLUE; 320 * 4];
-        for i in 0..320 {
-            unsafe {
-                LINE_BUF[i]           = Rgb565::BLUE;
-                LINE_BUF[320 + i]     = Rgb565::RED;
-                LINE_BUF[2 * 320 + i] = Rgb565::GREEN;
-                LINE_BUF[3 * 320 + i] = Rgb565::WHITE;
-                // LINE_BUF[4 * 320 + i] = Rgb565::BLUE;
-            }
+
+        // Fill each of the four lines in the PSRAM‐backed pixel buffer
+        for i in 0..display_width {
+            line_pixels[i]                               = Rgb565::BLUE;
+            line_pixels[display_width + i]               = Rgb565::RED;
+            line_pixels[2 * display_width + i]           = Rgb565::GREEN;
+            line_pixels[3 * display_width + i]           = Rgb565::WHITE;
         }
-        // Pack 4-line buffer into PSRAM DMA buffer
+
+        // Pack 4‐line buffer into the DMA transfer slice
         let dst = dma_tx.as_mut_slice();
-        for (i, pixel) in unsafe { LINE_BUF.iter().enumerate() } {
+        for (i, &pixel) in line_pixels.iter().enumerate() {
             let [lo, hi] = pixel.into_storage().to_le_bytes();
             dst[2 * i]     = lo;
             dst[2 * i + 1] = hi;
