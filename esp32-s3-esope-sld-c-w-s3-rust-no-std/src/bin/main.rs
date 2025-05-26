@@ -36,10 +36,10 @@ use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
 use esp_println::println;
 
 #[link_section = ".dma"]
-// Single DMA descriptor for 1 line (320 pixels × 2 bytes = 640 bytes)
+// Single DMA descriptor for 4 lines (320 pixels × 4 lines × 2 bytes = 2560 bytes)
 static mut LINE_DESCRIPTOR: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
-static mut LINE_BYTES: [u8; 320 * 2] = [0; 320 * 2];
-static mut LINE_BUF: [Rgb565; 320] = [Rgb565::BLUE; 320];
+static mut LINE_BYTES: [u8; 320 * 4 * 2] = [0; 320 * 4 * 2];
+static mut LINE_BUF: [Rgb565; 320 * 4] = [Rgb565::BLUE; 320 * 4];
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -196,18 +196,22 @@ fn main() -> ! {
         unsafe { DmaTxBuf::new(&mut LINE_DESCRIPTOR, &mut LINE_BYTES).unwrap() };
 
     loop {
-        info!("Drawing 1 line...");
-
-        // Fill LINE_BUF with a test pattern
-        for pixel in unsafe { &mut LINE_BUF } {
-            *pixel = Rgb565::BLUE;
+        info!("Drawing 4 lines now...");
+        // Fill each of the four lines with a distinct color
+        // Line 0: Blue, Line 1: Red, Line 2: Green, Line 3: White
+        for i in 0..320 {
+            unsafe {
+                LINE_BUF[i]           = Rgb565::BLUE;
+                LINE_BUF[320 + i]     = Rgb565::RED;
+                LINE_BUF[2 * 320 + i] = Rgb565::GREEN;
+                LINE_BUF[3 * 320 + i] = Rgb565::WHITE;
+            }
         }
-
-        // Convert LINE_BUF to LINE_BYTES
+        // Convert 4-line buffer to bytes
         for (i, pixel) in unsafe { LINE_BUF.iter().enumerate() } {
             let [lo, hi] = pixel.into_storage().to_le_bytes();
             unsafe {
-                LINE_BYTES[2 * i] = lo;
+                LINE_BYTES[2 * i]     = lo;
                 LINE_BYTES[2 * i + 1] = hi;
             }
         }
