@@ -111,24 +111,27 @@ fn main() -> ! {
 
     // Full-screen DMA constants
     const CHUNK_SIZE: usize = 4095;
-    const FRAME_BYTES: usize = 320 * 4 * 2;
+    const FRAME_BYTES: usize = 320 * 5 * 2;
     const NUM_DMA_DESC: usize = (FRAME_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
     #[link_section = ".dma"]
     static mut TX_DESCRIPTORS: [DmaDescriptor; NUM_DMA_DESC] =
         [DmaDescriptor::EMPTY; NUM_DMA_DESC];
 
-    // Allocate PSRAM buffer for full frame
-    let buf_box: Box<[u8; FRAME_BYTES]> = Box::new([0; FRAME_BYTES]);
-    // Box::leak turns it into a &'static mut [u8]
-    let psram_buf: &'static mut [u8] = Box::leak(buf_box);
+    #[repr(align(32))]
+    struct AlignedFrameBuf([u8; FRAME_BYTES]);
+    #[link_section = ".dma"]
+    static mut FRAME_BUF: AlignedFrameBuf = AlignedFrameBuf([0; FRAME_BYTES]);
+
+    // PSRAM-backed DMA buffer (aligned to 32 bytes)
+    let psram_buf: &'static mut [u8] = unsafe { &mut FRAME_BUF.0 };
 
     // Tie to descriptor set for one-shot DMA
     let mut dma_tx: DmaTxBuf =
         unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS[..], psram_buf).unwrap() };
 
-    // Allocate 4‐line pixel buffer in PSRAM
-    const LINES: usize = 4;
+    // Allocate multi-line pixel buffer in PSRAM
+    const LINES: usize = 5;
     const line_len:usize = 320 * LINES;
     let line_pixels_box: Box<[Rgb565; line_len]> = Box::new([Rgb565::BLACK; line_len]);
     let line_pixels: &'static mut [Rgb565; line_len] = Box::leak(line_pixels_box);
@@ -233,14 +236,18 @@ fn main() -> ! {
 
     info!("Entering main loop...");
     loop {
-        info!("Drawing 4 lines now...");
+        info!("Drawing {} lines now...", LINES);
 
-        // Fill each of the four lines in the PSRAM‐backed pixel buffer
-        for i in 0..display_width {
-            line_pixels[i]                               = Rgb565::BLUE;
-            line_pixels[display_width + i]               = Rgb565::RED;
-            line_pixels[2 * display_width + i]           = Rgb565::GREEN;
-            line_pixels[3 * display_width + i]           = Rgb565::WHITE;
+        // Fill each line with a gradient from dark to bright
+        for line in 0..LINES {
+            // Compute 5-bit red and blue, 6-bit green per line
+            let r = ((line * 31) / (LINES - 1)) as u8;
+            let g = ((line * 63) / (LINES - 1)) as u8;
+            let b = r;
+            let color = Rgb565::new(r, g, b);
+            for x in 0..display_width {
+                line_pixels[line * display_width + x] = color;
+            }
         }
 
         // Pack 4‐line buffer into the DMA transfer slice
@@ -269,4 +276,3 @@ fn main() -> ! {
         }
     }
 }
-
