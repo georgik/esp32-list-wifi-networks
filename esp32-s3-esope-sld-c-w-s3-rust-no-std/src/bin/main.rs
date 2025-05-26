@@ -35,11 +35,6 @@ use log::{error, info};
 use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
 use esp_println::println;
 
-#[link_section = ".dma"]
-// Single DMA descriptor for 4 lines (320 pixels × 4 lines × 2 bytes = 2560 bytes)
-static mut LINE_DESCRIPTOR: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
-static mut LINE_BYTES: [u8; 320 * 4 * 2] = [0; 320 * 4 * 2];
-static mut LINE_BUF: [Rgb565; 320 * 4] = [Rgb565::BLUE; 320 * 4];
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -114,6 +109,23 @@ fn main() -> ! {
     let display_height = u16::from_be_bytes([eeid[10], eeid[11]]) as usize;
     info!("Display size from EEPROM: {}x{}", display_width, display_height);
 
+    // Full-screen DMA constants
+    const CHUNK_SIZE: usize = 4095;
+    const FRAME_BYTES: usize = 320 * 4 * 2;
+    const NUM_DMA_DESC: usize = (FRAME_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+    #[link_section = ".dma"]
+    static mut TX_DESCRIPTORS: [DmaDescriptor; NUM_DMA_DESC] =
+        [DmaDescriptor::EMPTY; NUM_DMA_DESC];
+
+    // Allocate PSRAM buffer for full frame
+    let buf_box: Box<[u8; FRAME_BYTES]> = Box::new([0; FRAME_BYTES]);
+    let psram_buf: &'static mut [u8] = Box::leak(buf_box);
+
+    // Prepare full-frame DMA transaction
+    let mut dma_tx: DmaTxBuf =
+        unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
+
     info!("Initializing display...");
 
     // Panel‐enable / backlight
@@ -138,6 +150,28 @@ fn main() -> ! {
     let vsync_back  = u16::from_be_bytes([eeid[20], eeid[21]]);
     let vsync_front = u16::from_be_bytes([eeid[23], eeid[24]]) as u32;
 
+    // Log all infomration about display configuration
+    info!("Display configuration:");
+    info!("  Resolution: {}x{}", h_res, v_res);
+    info!("  PCLK: {} Hz", pclk_hz);
+    info!("  HSYNC pulse: {} pixels", hsync_pulse);
+    info!("  HSYNC back porch: {} pixels", hsync_back);
+    info!("  HSYNC front porch: {} pixels", hsync_front);
+    info!("  VSYNC pulse: {} lines", vsync_pulse);
+    info!("  VSYNC back porch: {} lines", vsync_back);
+    info!("  VSYNC front porch: {} lines", vsync_front);
+
+
+    let hsync_w = hsync_pulse as usize;
+    let hsync_back_porch = hsync_back as usize;
+    let hsync_front_porch = hsync_front as usize;
+    let horizontal_total = h_res + hsync_w + hsync_back_porch + hsync_front_porch;
+
+    let vsync_w = vsync_pulse as usize;
+    let vsync_back_porch = vsync_back as usize;
+    let vsync_front_porch = vsync_front as usize;
+    let vertical_total = v_res + vsync_w + vsync_back_porch + vsync_front_porch;
+
     let dpi_config = DpiConfig::default()
         .with_clock_mode(ClockMode {
             polarity: Polarity::IdleLow,
@@ -151,14 +185,14 @@ fn main() -> ! {
         .with_timing(FrameTiming {
             horizontal_active_width:   h_res,
             vertical_active_height:    v_res,
-            horizontal_total_width:    h_res + hsync_back as usize + hsync_front as usize,
-            horizontal_blank_front_porch: hsync_front as usize,
-            vertical_total_height:     v_res + vsync_back as usize + vsync_front as usize,
-            vertical_blank_front_porch:   vsync_front as usize,
-            hsync_width:               hsync_pulse as usize,
-            vsync_width:               vsync_pulse,
-            // start of HSYNC pulse relative to start of line = back porch
-            hsync_position:            hsync_back as usize,
+            horizontal_total_width:    horizontal_total,
+            horizontal_blank_front_porch: hsync_front_porch,
+            vertical_total_height:     vertical_total,
+            vertical_blank_front_porch:   vsync_front_porch,
+            hsync_width:               hsync_w,
+            vsync_width:               vsync_w,
+            // start of HSYNC pulse relative to start of line = back porch + pulse width
+            hsync_position:            hsync_back_porch + hsync_w,
         })
         .with_vsync_idle_level(Level::High)
         .with_hsync_idle_level(Level::High)
@@ -191,29 +225,26 @@ fn main() -> ! {
         .with_data15(peripherals.GPIO12);
 
     info!("Entering main loop...");
-    // Prepare DMA transaction for line streaming
-    let mut dma_tx: DmaTxBuf =
-        unsafe { DmaTxBuf::new(&mut LINE_DESCRIPTOR, &mut LINE_BYTES).unwrap() };
-
     loop {
         info!("Drawing 4 lines now...");
         // Fill each of the four lines with a distinct color
         // Line 0: Blue, Line 1: Red, Line 2: Green, Line 3: White
+        static mut LINE_BUF: [Rgb565; 320 * 4] = [Rgb565::BLUE; 320 * 4];
         for i in 0..320 {
             unsafe {
                 LINE_BUF[i]           = Rgb565::BLUE;
                 LINE_BUF[320 + i]     = Rgb565::RED;
                 LINE_BUF[2 * 320 + i] = Rgb565::GREEN;
                 LINE_BUF[3 * 320 + i] = Rgb565::WHITE;
+                // LINE_BUF[4 * 320 + i] = Rgb565::BLUE;
             }
         }
-        // Convert 4-line buffer to bytes
+        // Pack 4-line buffer into PSRAM DMA buffer
+        let dst = dma_tx.as_mut_slice();
         for (i, pixel) in unsafe { LINE_BUF.iter().enumerate() } {
             let [lo, hi] = pixel.into_storage().to_le_bytes();
-            unsafe {
-                LINE_BYTES[2 * i]     = lo;
-                LINE_BYTES[2 * i + 1] = hi;
-            }
+            dst[2 * i]     = lo;
+            dst[2 * i + 1] = hi;
         }
 
         // Send these lines via DPI+DMA
