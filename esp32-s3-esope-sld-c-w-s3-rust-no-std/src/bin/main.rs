@@ -36,9 +36,10 @@ use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
 use esp_println::println;
 
 #[link_section = ".dma"]
+// Single DMA descriptor for 1 line (320 pixels × 2 bytes = 640 bytes)
 static mut LINE_DESCRIPTOR: [DmaDescriptor; 1] = [DmaDescriptor::EMPTY; 1];
-static mut LINE_BYTES: [u8; 320 * 10 * 2] = [0; 320 * 10 * 2];
-static mut LINE_BUF: [Rgb565; 320 * 10] = [Rgb565::BLUE; 320 * 10];
+static mut LINE_BYTES: [u8; 320 * 2] = [0; 320 * 2];
+static mut LINE_BUF: [Rgb565; 320] = [Rgb565::BLUE; 320];
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -112,15 +113,6 @@ fn main() -> ! {
     let display_width = u16::from_be_bytes([eeid[8], eeid[9]]) as usize;
     let display_height = u16::from_be_bytes([eeid[10], eeid[11]]) as usize;
     info!("Display size from EEPROM: {}x{}", display_width, display_height);
-
-    // let timg0 = TimerGroup::new(peripherals.TIMG0);
-    // let _init = esp_wifi::init(
-    //     timg0.timer0,
-    //     esp_hal::rng::Rng::new(peripherals.RNG),
-    //     peripherals.RADIO_CLK,
-    // )
-    // .unwrap();
-
 
     info!("Initializing display...");
 
@@ -204,7 +196,7 @@ fn main() -> ! {
         unsafe { DmaTxBuf::new(&mut LINE_DESCRIPTOR, &mut LINE_BYTES).unwrap() };
 
     loop {
-        info!("Drawing 10 lines...");
+        info!("Drawing 1 line...");
 
         // Fill LINE_BUF with a test pattern
         for pixel in unsafe { &mut LINE_BUF } {
