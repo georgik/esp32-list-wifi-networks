@@ -32,7 +32,7 @@ use eeprom24x::{Eeprom24x, SlaveAddr};
 use log::{error, info};
 
 // DMA line‐buffer for parallel RGB (1 descriptor, up to 4095 bytes each)
-use esp_hal::dma::{DmaDescriptor, DmaTxBuf};
+use esp_hal::dma::{DmaDescriptor, DmaTxBuf, CHUNK_SIZE};
 use esp_println::println;
 
 
@@ -109,9 +109,11 @@ fn main() -> ! {
     let display_height = u16::from_be_bytes([eeid[10], eeid[11]]) as usize;
     info!("Display size from EEPROM: {}x{}", display_width, display_height);
 
+    // Number of lines to buffer
+    const LINES: usize = 5;
     // Full-screen DMA constants
-    const CHUNK_SIZE: usize = 4095;
-    const FRAME_BYTES: usize = 320 * 5 * 2;
+
+    const FRAME_BYTES: usize = 320 * LINES * 2;
     const NUM_DMA_DESC: usize = (FRAME_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
     #[link_section = ".dma"]
@@ -131,7 +133,6 @@ fn main() -> ! {
         unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS[..], psram_buf).unwrap() };
 
     // Allocate multi-line pixel buffer in PSRAM
-    const LINES: usize = 5;
     const line_len:usize = 320 * LINES;
     let line_pixels_box: Box<[Rgb565; line_len]> = Box::new([Rgb565::BLACK; line_len]);
     let line_pixels: &'static mut [Rgb565; line_len] = Box::leak(line_pixels_box);
