@@ -131,10 +131,15 @@ fn main() -> ! {
     info!("PSRAM buffer alignment modulo 32: {}", buf_ptr % 32);
     assert!(buf_ptr % 32 == 0, "PSRAM buffer must be 32-byte aligned for DMA");
 
+    // Compute chunk size parameters for chunked DMA transfers
+    let bytes_per_line = display_width * 2;
+    let lines_per_chunk = CHUNK_SIZE / bytes_per_line;
+    let safe_chunk_size = lines_per_chunk * bytes_per_line;
+    info!("Chunked DMA configuration: bytes_per_line = {}, lines_per_chunk = {}, safe_chunk_size = {}", bytes_per_line, lines_per_chunk, safe_chunk_size);
 
     // One-shot full-frame DMA buffer
-    let mut dma_tx: DmaTxBuf =
-        unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
+    // let mut dma_tx: DmaTxBuf =
+    //     unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
 
     info!("Initializing display...");
 
@@ -271,8 +276,7 @@ fn main() -> ! {
     loop {
         info!("Drawing full frame now...");
 
-        // Draw gradient across full frame and pack into PSRAM DMA buffer
-        let dst = dma_tx.as_mut_slice();
+        // Draw gradient across full frame directly into PSRAM buffer
         for y in 0..display_height {
             let r = ((y * 31) / (display_height - 1)) as u8;
             let g = ((y * 63) / (display_height - 1)) as u8;
@@ -281,26 +285,32 @@ fn main() -> ! {
             for x in 0..display_width {
                 let idx = (y * display_width + x) * 2;
                 let [lo, hi] = color.into_storage().to_le_bytes();
-                dst[idx] = lo;
-                dst[idx + 1] = hi;
+                psram_buf[idx] = lo;
+                psram_buf[idx + 1] = hi;
             }
         }
 
-        // Send these lines via DPI+DMA
-        match dpi.send(false, dma_tx) {
-            Ok(xfer) => {
-                let (res, new_dpi, new_tx) = xfer.wait();
-                dpi = new_dpi;
-                dma_tx = new_tx;
-                if let Err(e) = res {
-                    info!("DMA error: {:?}", e);
+        let mut offset = 0;
+        while offset < frame_bytes {
+            let len = safe_chunk_size.min(frame_bytes - offset);
+            // raw-slice the PSRAM buffer without borrowing
+            let buf_ptr = unsafe { psram_buf.as_mut_ptr().add(offset) };
+            let buf_chunk: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+            let tx = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, buf_chunk).unwrap() };
+            match dpi.send(false, tx) {
+                Ok(xfer) => {
+                    let (res, new_dpi, _buf) = xfer.wait();
+                    dpi = new_dpi;
+                    if let Err(e) = res {
+                        error!("DMA transfer error: {:?}", e);
+                    }
+                }
+                Err((e, new_dpi, _buf)) => {
+                    error!("DMA send error: {:?}", e);
+                    dpi = new_dpi;
                 }
             }
-            Err((e, new_dpi, new_tx)) => {
-                info!("DMA send error: {:?}", e);
-                dpi = new_dpi;
-                dma_tx = new_tx;
-            }
+            offset += len;
         }
     }
 }
