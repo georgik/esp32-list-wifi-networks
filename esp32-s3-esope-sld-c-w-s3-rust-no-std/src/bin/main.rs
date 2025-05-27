@@ -131,16 +131,6 @@ fn main() -> ! {
     info!("PSRAM buffer alignment modulo 32: {}", buf_ptr % 32);
     assert!(buf_ptr % 32 == 0, "PSRAM buffer must be 32-byte aligned for DMA");
 
-    // Compute chunk size parameters for chunked DMA transfers
-    let bytes_per_line = display_width * 2;
-    let lines_per_chunk = CHUNK_SIZE / bytes_per_line;
-    let safe_chunk_size = lines_per_chunk * bytes_per_line;
-    info!("Chunked DMA configuration: bytes_per_line = {}, lines_per_chunk = {}, safe_chunk_size = {}", bytes_per_line, lines_per_chunk, safe_chunk_size);
-
-    // One-shot full-frame DMA buffer
-    // let mut dma_tx: DmaTxBuf =
-    //     unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
-
     info!("Initializing display...");
 
     // Panel‐enable / backlight
@@ -198,15 +188,15 @@ fn main() -> ! {
     if hsync_pulse < 4 {
         error!("HSYNC pulse width is too low: {} pixels, setting to minimum 4 pixels", hsync_pulse);
     }
-    
+
     if hsync_back_porch < 43 {
         error!("HSYNC back porch is too low: {} pixels, setting to minimum 43 pixels", hsync_back);
     }
-    
+
     if hsync_front_porch < 8 {
         error!("HSYNC front porch is too low: {} pixels, setting to minimum 8 pixels", hsync_front);
     }
-    
+
     if vsync_pulse < 4 {
         error!("VSYNC pulse width is too low: {} lines, setting to minimum 4 lines", vsync_pulse);
     }
@@ -214,11 +204,11 @@ fn main() -> ! {
     if vsync_back_porch < 12 {
         error!("VSYNC back porch is too low: {} lines, setting to minimum 12 lines", vsync_back);
     }
-    
+
     if vsync_front_porch < 8 {
         error!("VSYNC front porch is too low: {} lines, setting to minimum 8 lines", vsync_front);
     }
-    
+
     let dpi_config = DpiConfig::default()
         .with_clock_mode(ClockMode {
             polarity: if pclk_active_neg { Polarity::IdleHigh } else { Polarity::IdleLow },
@@ -290,6 +280,8 @@ fn main() -> ! {
             }
         }
 
+        // Chunked full-frame transfer
+        let safe_chunk_size = CHUNK_SIZE.min(frame_bytes);
         let mut offset = 0;
         while offset < frame_bytes {
             let len = safe_chunk_size.min(frame_bytes - offset);
