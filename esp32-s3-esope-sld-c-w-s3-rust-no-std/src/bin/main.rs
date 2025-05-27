@@ -15,6 +15,7 @@ use esp_hal::lcd_cam::{
 };
 use esp_hal::gpio::{Output, OutputConfig};
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use embedded_graphics::{
     Drawable,
     pixelcolor::Rgb565,
@@ -109,33 +110,31 @@ fn main() -> ! {
     let display_height = u16::from_be_bytes([eeid[10], eeid[11]]) as usize;
     info!("Display size from EEPROM: {}x{}", display_width, display_height);
 
-    // Number of lines to buffer
-    const LINES: usize = 5;
     // Full-screen DMA constants
-
-    const FRAME_BYTES: usize = 320 * LINES * 2;
-    const NUM_DMA_DESC: usize = (FRAME_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    const MAX_FRAME_BYTES: usize = 320 * 240 * 2;
+    const MAX_NUM_DMA_DESC: usize = (MAX_FRAME_BYTES + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
     #[link_section = ".dma"]
-    static mut TX_DESCRIPTORS: [DmaDescriptor; NUM_DMA_DESC] =
-        [DmaDescriptor::EMPTY; NUM_DMA_DESC];
+    static mut TX_DESCRIPTORS: [DmaDescriptor; MAX_NUM_DMA_DESC] =
+        [DmaDescriptor::EMPTY; MAX_NUM_DMA_DESC];
 
-    #[repr(align(32))]
-    struct AlignedFrameBuf([u8; FRAME_BYTES]);
-    #[link_section = ".dma"]
-    static mut FRAME_BUF: AlignedFrameBuf = AlignedFrameBuf([0; FRAME_BYTES]);
+    // Allocate PSRAM buffer for entire frame at runtime
+    let frame_bytes = display_width * display_height * 2;
+    let mut psram_box = Vec::with_capacity(frame_bytes);
+    psram_box.resize(frame_bytes, 0);
+    let psram_buf: &'static mut [u8] = Box::leak(psram_box.into_boxed_slice());
 
-    // PSRAM-backed DMA buffer (aligned to 32 bytes)
-    let psram_buf: &'static mut [u8] = unsafe { &mut FRAME_BUF.0 };
+    // Verify PSRAM buffer allocation and alignment
+    let buf_ptr = psram_buf.as_ptr() as usize;
+    info!("PSRAM buffer allocated at address: 0x{:08X}", buf_ptr);
+    info!("PSRAM buffer length: {}", psram_buf.len());
+    info!("PSRAM buffer alignment modulo 32: {}", buf_ptr % 32);
+    assert!(buf_ptr % 32 == 0, "PSRAM buffer must be 32-byte aligned for DMA");
 
-    // Tie to descriptor set for one-shot DMA
+
+    // One-shot full-frame DMA buffer
     let mut dma_tx: DmaTxBuf =
-        unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS[..], psram_buf).unwrap() };
-
-    // Allocate multi-line pixel buffer in PSRAM
-    const line_len:usize = 320 * LINES;
-    let line_pixels_box: Box<[Rgb565; line_len]> = Box::new([Rgb565::BLACK; line_len]);
-    let line_pixels: &'static mut [Rgb565; line_len] = Box::leak(line_pixels_box);
+        unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, psram_buf).unwrap() };
 
     info!("Initializing display...");
 
@@ -161,6 +160,13 @@ fn main() -> ! {
     let vsync_back  = u16::from_be_bytes([eeid[20], eeid[21]]);
     let vsync_front = u16::from_be_bytes([eeid[23], eeid[24]]) as u32;
 
+    // Read idle/polarity flags from EEPROM (eeid[25])
+    let flags = eeid[25];
+    let hsync_idle_low  = (flags & 0x01) != 0;
+    let vsync_idle_low  = (flags & 0x02) != 0;
+    let de_idle_high    = (flags & 0x04) != 0;
+    let pclk_active_neg = (flags & 0x20) != 0;
+
     // Log all infomration about display configuration
     info!("Display configuration:");
     info!("  Resolution: {}x{}", h_res, v_res);
@@ -183,10 +189,35 @@ fn main() -> ! {
     let vsync_front_porch = vsync_front as usize;
     let vertical_total = v_res + vsync_w + vsync_back_porch + vsync_front_porch;
 
+    // Check timing configuration and set minimal values, with warning if the value was too low
+    if hsync_pulse < 4 {
+        error!("HSYNC pulse width is too low: {} pixels, setting to minimum 4 pixels", hsync_pulse);
+    }
+    
+    if hsync_back_porch < 43 {
+        error!("HSYNC back porch is too low: {} pixels, setting to minimum 43 pixels", hsync_back);
+    }
+    
+    if hsync_front_porch < 8 {
+        error!("HSYNC front porch is too low: {} pixels, setting to minimum 8 pixels", hsync_front);
+    }
+    
+    if vsync_pulse < 4 {
+        error!("VSYNC pulse width is too low: {} lines, setting to minimum 4 lines", vsync_pulse);
+    }
+
+    if vsync_back_porch < 12 {
+        error!("VSYNC back porch is too low: {} lines, setting to minimum 12 lines", vsync_back);
+    }
+    
+    if vsync_front_porch < 8 {
+        error!("VSYNC front porch is too low: {} lines, setting to minimum 8 lines", vsync_front);
+    }
+    
     let dpi_config = DpiConfig::default()
         .with_clock_mode(ClockMode {
-            polarity: Polarity::IdleLow,
-            phase:    Phase::ShiftLow,
+            polarity: if pclk_active_neg { Polarity::IdleHigh } else { Polarity::IdleLow },
+            phase:    if pclk_active_neg { Phase::ShiftHigh } else { Phase::ShiftLow },
         })
         .with_frequency(Rate::from_hz(pclk_hz))
         .with_format(Format {
@@ -205,9 +236,10 @@ fn main() -> ! {
             // start of HSYNC pulse relative to start of line = back porch + pulse width
             hsync_position:            hsync_back_porch + hsync_w,
         })
-        .with_vsync_idle_level(Level::High)
-        .with_hsync_idle_level(Level::High)
-        .with_de_idle_level(Level::Low)
+        // apply idle levels based on EEPROM flags
+        .with_vsync_idle_level(if vsync_idle_low { Level::Low } else { Level::High })
+        .with_hsync_idle_level(if hsync_idle_low { Level::Low } else { Level::High })
+        .with_de_idle_level(if de_idle_high { Level::High } else { Level::Low })
         .with_disable_black_region(false);
 
     let mut dpi = Dpi::new(lcd_cam.lcd, peripherals.DMA_CH2, dpi_config).unwrap()
@@ -237,26 +269,21 @@ fn main() -> ! {
 
     info!("Entering main loop...");
     loop {
-        info!("Drawing {} lines now...", LINES);
+        info!("Drawing full frame now...");
 
-        // Fill each line with a gradient from dark to bright
-        for line in 0..LINES {
-            // Compute 5-bit red and blue, 6-bit green per line
-            let r = ((line * 31) / (LINES - 1)) as u8;
-            let g = ((line * 63) / (LINES - 1)) as u8;
+        // Draw gradient across full frame and pack into PSRAM DMA buffer
+        let dst = dma_tx.as_mut_slice();
+        for y in 0..display_height {
+            let r = ((y * 31) / (display_height - 1)) as u8;
+            let g = ((y * 63) / (display_height - 1)) as u8;
             let b = r;
             let color = Rgb565::new(r, g, b);
             for x in 0..display_width {
-                line_pixels[line * display_width + x] = color;
+                let idx = (y * display_width + x) * 2;
+                let [lo, hi] = color.into_storage().to_le_bytes();
+                dst[idx] = lo;
+                dst[idx + 1] = hi;
             }
-        }
-
-        // Pack 4‐line buffer into the DMA transfer slice
-        let dst = dma_tx.as_mut_slice();
-        for (i, &pixel) in line_pixels.iter().enumerate() {
-            let [lo, hi] = pixel.into_storage().to_le_bytes();
-            dst[2 * i]     = lo;
-            dst[2 * i + 1] = hi;
         }
 
         // Send these lines via DPI+DMA
