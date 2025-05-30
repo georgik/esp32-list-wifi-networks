@@ -230,16 +230,16 @@ fn main() -> ! {
             ..Default::default()
         })
         .with_timing(FrameTiming {
-            horizontal_active_width:   h_res + 32,
+            horizontal_active_width:   h_res,
             vertical_active_height:    v_res,
-            horizontal_total_width:    horizontal_total + 24,
-            horizontal_blank_front_porch: hsync_front_porch + 24,
-            vertical_total_height:     vertical_total + 24,
-            vertical_blank_front_porch:   vsync_front_porch + 24,
+            horizontal_total_width:    horizontal_total,
+            horizontal_blank_front_porch: hsync_front_porch ,
+            vertical_total_height:     vertical_total,
+            vertical_blank_front_porch:   vsync_front_porch,
             hsync_width:               hsync_w,
             vsync_width:               vsync_w,
             // start of HSYNC pulse relative to start of line = back porch + pulse width
-            hsync_position:            hsync_back_porch + hsync_w + 32,
+            hsync_position:            hsync_back_porch + hsync_w,
         })
         // apply idle levels based on EEPROM flags
         .with_vsync_idle_level(if vsync_idle_low { Level::Low } else { Level::High })
@@ -304,7 +304,7 @@ fn main() -> ! {
         }
 
         // Chunked full-frame transfer
-        let safe_chunk_size = 10 * 1024 * 2;
+        let safe_chunk_size = 40 * 1024 * 2;
         let mut offset = 0;
         while offset < frame_bytes {
             let len = safe_chunk_size.min(frame_bytes - offset);
