@@ -234,7 +234,7 @@ fn main() -> ! {
             horizontal_total_width:       320 + 4 + 43 + 79 + 8,  // =446
             horizontal_blank_front_porch: 79 + 8,    // was 47, add 32px
             vertical_active_height:       240,
-            vertical_total_height:        240 + 4 + 12 + 8,   // =264 (same)
+            vertical_total_height:        240 + 4 + 12 + 16,  // increased blank front porch to 16
             vertical_blank_front_porch:    16,
             hsync_width:                  4,
             vsync_width:                  4,
@@ -299,7 +299,7 @@ fn main() -> ! {
     };
 
     loop {
-        info!("Drawing full frame now...");
+        // info!("Drawing full frame now...");
 
         // Chunked full-frame transfer
         let safe_chunk_size = 320 * 240 *2 ;
