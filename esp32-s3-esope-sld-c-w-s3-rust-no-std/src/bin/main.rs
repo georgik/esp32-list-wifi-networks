@@ -230,16 +230,15 @@ fn main() -> ! {
             ..Default::default()
         })
         .with_timing(FrameTiming {
-            horizontal_active_width:   h_res,
-            vertical_active_height:    v_res,
-            horizontal_total_width:    horizontal_total,
-            horizontal_blank_front_porch: hsync_front_porch ,
-            vertical_total_height:     vertical_total,
-            vertical_blank_front_porch:   vsync_front_porch,
-            hsync_width:               hsync_w,
-            vsync_width:               vsync_w,
-            // start of HSYNC pulse relative to start of line = back porch + pulse width
-            hsync_position:            hsync_back_porch + hsync_w,
+            horizontal_active_width:      320,
+            horizontal_total_width:       320 + 4 + 43 + 79 + 8,  // =446
+            horizontal_blank_front_porch: 79 + 8,    // was 47, add 32px
+            vertical_active_height:       240,
+            vertical_total_height:        240 + 4 + 12 + 8,   // =264 (same)
+            vertical_blank_front_porch:    16,
+            hsync_width:                  4,
+            vsync_width:                  4,
+            hsync_position:               43 + 4, // (= back_porch + pulse = 47)
         })
         // apply idle levels based on EEPROM flags
         .with_vsync_idle_level(if vsync_idle_low { Level::Low } else { Level::High })
@@ -272,6 +271,20 @@ fn main() -> ! {
         .with_data14(peripherals.GPIO19)
         .with_data15(peripherals.GPIO12);
 
+    // Draw gradient across full frame directly into PSRAM buffer
+    for y in 0..display_height {
+        let r = ((y * 31) / (display_height - 1)) as u8;
+        let g = ((y * 63) / (display_height - 1)) as u8;
+        let b = r;
+        let color = Rgb565::new(r, g, b);
+        for x in 0..display_width {
+            let idx = (y * display_width + x) * 2;
+            let [lo, hi] = color.into_storage().to_le_bytes();
+            psram_buf[idx] = lo;
+            psram_buf[idx + 1] = hi;
+        }
+    }
+
     info!("Entering main loop...");
     // small timer to throttle between DMA chunks
     let delay = Delay::new();
@@ -288,23 +301,8 @@ fn main() -> ! {
     loop {
         info!("Drawing full frame now...");
 
-        // Draw gradient across full frame directly into PSRAM buffer
-        let buf = dma_tx.as_mut_slice();
-        for y in 0..display_height {
-            let r = ((y * 31) / (display_height - 1)) as u8;
-            let g = ((y * 63) / (display_height - 1)) as u8;
-            let b = r;
-            let color = Rgb565::new(r, g, b);
-            for x in 0..display_width {
-                let idx = (y * display_width + x) * 2;
-                let [lo, hi] = color.into_storage().to_le_bytes();
-                buf[idx] = lo;
-                buf[idx + 1] = hi;
-            }
-        }
-
         // Chunked full-frame transfer
-        let safe_chunk_size = 40 * 1024 * 2;
+        let safe_chunk_size = 320 * 240 *2 ;
         let mut offset = 0;
         while offset < frame_bytes {
             let len = safe_chunk_size.min(frame_bytes - offset);
