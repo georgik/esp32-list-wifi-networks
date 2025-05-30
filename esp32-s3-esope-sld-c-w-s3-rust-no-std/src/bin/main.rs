@@ -2,6 +2,8 @@
 #![no_main]
 
 use esp_hal::peripherals::*;
+use esp_hal::dma::ExternalBurstConfig;
+
 use esp_hal::gpio::Level;
 use esp_hal::delay::Delay;
 use esp_println::logger::init_logger_from_env;
@@ -129,7 +131,7 @@ fn main() -> ! {
     info!("PSRAM buffer allocated at address: 0x{:08X}", buf_ptr);
     info!("PSRAM buffer length: {}", psram_buf.len());
     info!("PSRAM buffer alignment modulo 32: {}", buf_ptr % 32);
-    assert!(buf_ptr % 32 == 0, "PSRAM buffer must be 32-byte aligned for DMA");
+    assert!(buf_ptr % 64 == 0, "PSRAM buffer must be 64-byte aligned for DMA");
 
     info!("Initializing display...");
 
@@ -137,6 +139,14 @@ fn main() -> ! {
     let mut panel_enable = Output::new(peripherals.GPIO42, Level::Low, OutputConfig::default());
     // some boards require LOW→HIGH pulse, or just HIGH
     panel_enable.set_high();
+
+    // Backlight enable (PWM output pin)
+    let mut backlight = Output::new(peripherals.GPIO39, Level::Low, OutputConfig::default());
+    backlight.set_high();
+
+    // Touch reset line
+    let mut touch_reset = Output::new(peripherals.GPIO2, Level::High, OutputConfig::default());
+    // Optionally pulse low-high here if required by the module.
 
 
     // Initialize the parallel‐RGB display via DPI
@@ -220,16 +230,16 @@ fn main() -> ! {
             ..Default::default()
         })
         .with_timing(FrameTiming {
-            horizontal_active_width:   h_res,
+            horizontal_active_width:   h_res + 32,
             vertical_active_height:    v_res,
-            horizontal_total_width:    horizontal_total,
-            horizontal_blank_front_porch: hsync_front_porch,
-            vertical_total_height:     vertical_total,
-            vertical_blank_front_porch:   vsync_front_porch,
+            horizontal_total_width:    horizontal_total + 24,
+            horizontal_blank_front_porch: hsync_front_porch + 24,
+            vertical_total_height:     vertical_total + 24,
+            vertical_blank_front_porch:   vsync_front_porch + 24,
             hsync_width:               hsync_w,
             vsync_width:               vsync_w,
             // start of HSYNC pulse relative to start of line = back porch + pulse width
-            hsync_position:            hsync_back_porch + hsync_w,
+            hsync_position:            hsync_back_porch + hsync_w + 32,
         })
         // apply idle levels based on EEPROM flags
         .with_vsync_idle_level(if vsync_idle_low { Level::Low } else { Level::High })
@@ -263,10 +273,23 @@ fn main() -> ! {
         .with_data15(peripherals.GPIO12);
 
     info!("Entering main loop...");
+    // small timer to throttle between DMA chunks
+    let delay = Delay::new();
+
+    // Configure a single DMA buffer over the whole PSRAM region with 64‑byte bursts
+    let mut dma_tx: DmaTxBuf = unsafe {
+        DmaTxBuf::new_with_config(
+            &mut TX_DESCRIPTORS,
+            psram_buf,
+            ExternalBurstConfig::Size64,
+        ).unwrap()
+    };
+
     loop {
         info!("Drawing full frame now...");
 
         // Draw gradient across full frame directly into PSRAM buffer
+        let buf = dma_tx.as_mut_slice();
         for y in 0..display_height {
             let r = ((y * 31) / (display_height - 1)) as u8;
             let g = ((y * 63) / (display_height - 1)) as u8;
@@ -275,31 +298,30 @@ fn main() -> ! {
             for x in 0..display_width {
                 let idx = (y * display_width + x) * 2;
                 let [lo, hi] = color.into_storage().to_le_bytes();
-                psram_buf[idx] = lo;
-                psram_buf[idx + 1] = hi;
+                buf[idx] = lo;
+                buf[idx + 1] = hi;
             }
         }
 
         // Chunked full-frame transfer
-        let safe_chunk_size = CHUNK_SIZE.min(frame_bytes);
+        let safe_chunk_size = 10 * 1024 * 2;
         let mut offset = 0;
         while offset < frame_bytes {
             let len = safe_chunk_size.min(frame_bytes - offset);
-            // raw-slice the PSRAM buffer without borrowing
-            let buf_ptr = unsafe { psram_buf.as_mut_ptr().add(offset) };
-            let buf_chunk: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-            let tx = unsafe { DmaTxBuf::new(&mut TX_DESCRIPTORS, buf_chunk).unwrap() };
-            match dpi.send(false, tx) {
+            dma_tx.set_length(len);
+            match dpi.send(false, dma_tx) {
                 Ok(xfer) => {
-                    let (res, new_dpi, _buf) = xfer.wait();
+                    let (res, new_dpi, new_dma_tx) = xfer.wait();
                     dpi = new_dpi;
+                    dma_tx = new_dma_tx;
                     if let Err(e) = res {
                         error!("DMA transfer error: {:?}", e);
                     }
                 }
-                Err((e, new_dpi, _buf)) => {
+                Err((e, new_dpi, new_dma_tx)) => {
                     error!("DMA send error: {:?}", e);
                     dpi = new_dpi;
+                    dma_tx = new_dma_tx;
                 }
             }
             offset += len;
