@@ -34,6 +34,93 @@ use esp_hal::i2c::master::I2c;
 use eeprom24x::{Eeprom24x, SlaveAddr};
 use log::{error, info};
 
+use esp_hal::rng::Rng;
+// --- Game of Life Definitions ---
+const GRID_WIDTH: usize = 70;
+const GRID_HEIGHT: usize = 70;
+const LCD_H_RES_USIZE: usize = 320;
+const LCD_V_RES_USIZE: usize = 240;
+const LCD_BUFFER_SIZE: usize = LCD_H_RES_USIZE * LCD_V_RES_USIZE;
+
+// --- Game of Life Functions ---
+fn randomize_grid(rng: &mut Rng, grid: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT]) {
+    for y in 0..GRID_HEIGHT {
+        for x in 0..GRID_WIDTH {
+            let val = rng.random();
+            grid[y][x] = if val & 1 == 1 { 1 } else { 0 };
+        }
+    }
+}
+
+fn update_game_of_life(grid: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT]) {
+    let mut new_grid = [[0u8; GRID_WIDTH]; GRID_HEIGHT];
+    for y in 0..GRID_HEIGHT {
+        for x in 0..GRID_WIDTH {
+            let mut neighbors = 0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && nx < GRID_WIDTH as i32 && ny >= 0 && ny < GRID_HEIGHT as i32 {
+                        if grid[ny as usize][nx as usize] > 0 {
+                            neighbors += 1;
+                        }
+                    }
+                }
+            }
+            let cell = grid[y][x];
+            new_grid[y][x] = match (cell > 0, neighbors) {
+                (true, 2) | (true, 3) => cell.saturating_add(1), // stay alive, age
+                (false, 3) => 1, // born
+                _ => 0, // dead
+            };
+        }
+    }
+    *grid = new_grid;
+}
+
+fn age_to_color(age: u8) -> Rgb565 {
+    match age {
+        0 => Rgb565::BLACK,
+        1 => Rgb565::new(31, 63, 31),
+        2..=3 => Rgb565::new(31, 48, 0),
+        4..=7 => Rgb565::new(0, 63, 0),
+        8..=15 => Rgb565::new(0, 0, 31),
+        _ => Rgb565::new(31, 0, 0),
+    }
+}
+
+fn draw_grid<D: DrawTarget<Color = Rgb565>>(
+    display: &mut D,
+    grid: &[[u8; GRID_WIDTH]; GRID_HEIGHT],
+) -> Result<(), D::Error> {
+    let border_color = Rgb565::new(230, 230, 230);
+    for (y, row) in grid.iter().enumerate() {
+        for (x, &age) in row.iter().enumerate() {
+            let point = Point::new(x as i32 * 7, y as i32 * 7);
+            if age > 0 {
+                // Draw a border then fill with color based on age.
+                Rectangle::new(point, Size::new(7, 7))
+                    .into_styled(PrimitiveStyle::with_fill(border_color))
+                    .draw(display)?;
+                // Draw an inner cell with color according to age.
+                Rectangle::new(point + Point::new(1, 1), Size::new(5, 5))
+                    .into_styled(PrimitiveStyle::with_fill(age_to_color(age)))
+                    .draw(display)?;
+            } else {
+                // Draw a dead cell as black.
+                Rectangle::new(point, Size::new(7, 7))
+                    .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+                    .draw(display)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 // DMA line‐buffer for parallel RGB (1 descriptor, up to 4095 bytes each)
 use esp_hal::dma::{DmaDescriptor, DmaTxBuf, CHUNK_SIZE};
 use esp_println::println;
@@ -271,6 +358,18 @@ fn main() -> ! {
         .with_data14(peripherals.GPIO19)
         .with_data15(peripherals.GPIO12);
 
+    // --- Initialize Game of Life Framebuffer ---
+    let mut game_grid = [[0u8; GRID_WIDTH]; GRID_HEIGHT];
+    let mut rng = Rng::new(peripherals.RNG);
+    randomize_grid(&mut rng, &mut game_grid);
+
+    let fb_data: Box<[Rgb565; LCD_BUFFER_SIZE]> = Box::new([Rgb565::BLACK; LCD_BUFFER_SIZE]);
+    let heap_buffer = HeapBuffer::new(fb_data);
+    let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
+
+    // Draw initial state
+    draw_grid(&mut frame_buf, &game_grid).unwrap();
+
     // Draw gradient across full frame directly into PSRAM buffer
     for y in 0..display_height {
         let r = ((y * 31) / (display_height - 1)) as u8;
@@ -285,9 +384,19 @@ fn main() -> ! {
         }
     }
 
+    update_game_of_life(&mut game_grid);
+    draw_grid(&mut frame_buf, &game_grid).unwrap();
+
     info!("Entering main loop...");
     // small timer to throttle between DMA chunks
     let delay = Delay::new();
+
+    // Transfer data from framebuffer into psram buf
+    for (i, px) in frame_buf.data.iter().enumerate() {
+        let [lo, hi] = px.into_storage().to_le_bytes();
+        psram_buf[2 * i] = lo;
+        psram_buf[2 * i + 1] = hi;
+    }
 
     // Configure a single DMA buffer over the whole PSRAM region with 64‑byte bursts
     let mut dma_tx: DmaTxBuf = unsafe {
@@ -299,7 +408,8 @@ fn main() -> ! {
     };
 
     loop {
-        // info!("Drawing full frame now...");
+        // update_game_of_life(&mut game_grid);
+        // draw_grid(&mut frame_buf, &game_grid).unwrap();
 
         // Chunked full-frame transfer
         let safe_chunk_size = 320 * 240 *2 ;
@@ -322,7 +432,6 @@ fn main() -> ! {
                     dma_tx = new_dma_tx;
                 }
             }
-            offset += len;
         }
     }
 }
