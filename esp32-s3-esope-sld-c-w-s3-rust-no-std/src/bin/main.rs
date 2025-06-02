@@ -35,7 +35,7 @@ use static_cell::StaticCell;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::Ticker;
-use esp_hal::timer::timg::TimerGroup;
+use esp_hal::timer::{AnyTimer, timg::TimerGroup};
 use esp_hal::i2c::master::I2c;
 use eeprom24x::{Eeprom24x, SlaveAddr};
 use log::{error, info};
@@ -215,6 +215,9 @@ static mut PSRAM_BUF_LEN: usize = 0;
 async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    // Initialize TimerGroup and timer1 for app core Embassy time driver
+    let timg1 = TimerGroup::new(peripherals.TIMG1);
+    let timer1: AnyTimer = timg1.timer0.into();
     println!("Starting up...");
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
     println!("PSRAM allocator initialized");
@@ -440,12 +443,16 @@ async fn main(spawner: Spawner) -> ! {
 
     // Signal to app core that PSRAM is ready
     PSRAM_READY.signal(());
-
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let timer0: AnyTimer = timg0.timer0.into();
+    
     // Spawn Conway update task on app core (core 1)
     let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
     let _app_core = cpu_control.start_app_core(
         unsafe { &mut APP_CORE_STACK },
         move || {
+            // Initialize Embassy time driver on app core
+            esp_hal_embassy::init([timer0, timer1]);
             // SAFETY: PSRAM_BUF_PTR and PSRAM_BUF_LEN are published before
             let psram_ptr = unsafe { PSRAM_BUF_PTR };
             let psram_len = unsafe { PSRAM_BUF_LEN };
@@ -503,7 +510,7 @@ async fn conway_task(psram_ptr: *mut u8, psram_len: usize) {
         }
     }
     let mut frame_buf = FrameBuf::new(PSRAMFrameBuffer::new(fb), LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
-    // let mut ticker = Ticker::every(embassy_time::Duration::from_millis(100));
+    let mut ticker = Ticker::every(embassy_time::Duration::from_millis(100));
     loop {
         // Log message with core number
         println!("Core {}: Updating Game of Life grid...", Cpu::current() as usize);
@@ -511,6 +518,6 @@ async fn conway_task(psram_ptr: *mut u8, psram_len: usize) {
         update_game_of_life(&*game_grid, &mut *next_grid);
         core::mem::swap(&mut game_grid, &mut next_grid);
         draw_grid(&mut frame_buf, &*game_grid).ok();
-        // ticker.next().await;
+        ticker.next().await;
     }
 }
