@@ -206,12 +206,16 @@ fn main() -> ! {
     static mut TX_DESCRIPTORS: [DmaDescriptor; MAX_NUM_DMA_DESC] =
         [DmaDescriptor::EMPTY; MAX_NUM_DMA_DESC];
 
-    // Allocate PSRAM buffer for entire frame at runtime
-    let frame_bytes = display_width * display_height * 2;
-    let mut psram_box = Vec::with_capacity(frame_bytes);
-    psram_box.resize(frame_bytes, 0);
-    let psram_buf: &'static mut [u8] = Box::leak(psram_box.into_boxed_slice());
-
+    // Allocate framebuffer in PSRAM and reuse as DMA buffer
+    const FRAME_BYTES: usize = LCD_BUFFER_SIZE * 2;
+    let mut fb_box: Box<[Rgb565; LCD_BUFFER_SIZE]> = Box::new([Rgb565::BLACK; LCD_BUFFER_SIZE]);
+    let fb_ptr: *mut Rgb565 = fb_box.as_mut_ptr();
+    let psram_buf: &'static mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(
+            fb_ptr as *mut u8,
+            FRAME_BYTES
+        )
+    };
     // Verify PSRAM buffer allocation and alignment
     let buf_ptr = psram_buf.as_ptr() as usize;
     info!("PSRAM buffer allocated at address: 0x{:08X}", buf_ptr);
@@ -375,8 +379,7 @@ fn main() -> ! {
     let mut rng = Rng::new(peripherals.RNG);
     randomize_grid(&mut rng, &mut game_grid);
 
-    let fb_data: Box<[Rgb565; LCD_BUFFER_SIZE]> = Box::new([Rgb565::BLACK; LCD_BUFFER_SIZE]);
-    let heap_buffer = HeapBuffer::new(fb_data);
+    let heap_buffer = HeapBuffer::new(fb_box);
     let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
 
     update_game_of_life(&mut game_grid);
@@ -396,9 +399,12 @@ fn main() -> ! {
     loop {
         info!("Drawing full frame now...");
 
+        // update_game_of_life(&mut game_grid);
+        // draw_grid(&mut frame_buf, &game_grid).unwrap();
+
         // Chunked full-frame transfer
         let safe_chunk_size = 320 * 240 *2 ;
-
+        let frame_bytes = display_width * display_height * 2;
         let len = safe_chunk_size.min(frame_bytes );
         dma_tx.set_length(len);
         match dpi.send(false, dma_tx) {
