@@ -491,6 +491,7 @@ async fn conway_task(psram_ptr: *mut u8, psram_len: usize) {
     let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
     let mut ticker = Ticker::every(embassy_time::Duration::from_millis(33));
     loop {
+        println!("Conway update task running...");
         update_game_of_life(&*game_grid, &mut *next_grid);
         core::mem::swap(&mut game_grid, &mut next_grid);
         draw_grid(&mut frame_buf, &*game_grid).ok();
