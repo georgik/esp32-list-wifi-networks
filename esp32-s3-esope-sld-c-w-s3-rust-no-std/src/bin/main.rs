@@ -28,7 +28,13 @@ use embedded_graphics_framebuf::FrameBuf;
 use embedded_graphics_framebuf::backends::FrameBufferBackend;
 
 use esp_hal::clock::CpuClock;
-use esp_hal::main;
+use core::ptr::addr_of_mut;
+use embassy_executor::Spawner;
+use esp_hal_embassy::Executor;
+use static_cell::StaticCell;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+use embassy_time::Ticker;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::i2c::master::I2c;
 use eeprom24x::{Eeprom24x, SlaveAddr};
@@ -122,6 +128,7 @@ fn update_game_of_life(
 
 
 use esp_hal::rng::Rng;
+use esp_hal::system::{CpuControl, Stack};
 
 fn randomize_grid(rng: &mut Rng, grid: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT]) {
     for y in 0..GRID_HEIGHT {
@@ -173,8 +180,15 @@ const LCD_H_RES_USIZE: usize = 320;
 const LCD_V_RES_USIZE: usize = 240;
 const LCD_BUFFER_SIZE: usize = LCD_H_RES_USIZE * LCD_V_RES_USIZE;
 
-#[main]
-fn main() -> ! {
+// Embassy multicore: allocate app core stack
+static mut APP_CORE_STACK: Stack<8192> = Stack::new();
+
+static PSRAM_READY: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static mut PSRAM_BUF_PTR: *mut u8 = core::ptr::null_mut();
+static mut PSRAM_BUF_LEN: usize = 0;
+
+#[esp_hal_embassy::main]
+async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     println!("Starting up...");
@@ -223,6 +237,11 @@ fn main() -> ! {
     info!("PSRAM buffer length: {}", psram_buf.len());
     info!("PSRAM buffer alignment modulo 32: {}", buf_ptr % 32);
     assert!(buf_ptr % 64 == 0, "PSRAM buffer must be 64-byte aligned for DMA");
+    // Publish PSRAM buffer pointer and len for app core
+    unsafe {
+        PSRAM_BUF_PTR = psram_buf.as_mut_ptr();
+        PSRAM_BUF_LEN = psram_buf.len();
+    }
 
     info!("Initializing display...");
 
@@ -376,11 +395,13 @@ fn main() -> ! {
         }
     }
 
+    // Set up grid and randomize, but pass to app core for updating
     let mut game_grid = Box::new([[0u8; GRID_WIDTH]; GRID_HEIGHT]);
     let mut next_grid = Box::new([[0u8; GRID_WIDTH]; GRID_HEIGHT]);
     let mut rng = Rng::new(peripherals.RNG);
     randomize_grid(&mut rng, &mut *game_grid);
 
+    // HeapBuffer and FrameBuf for initial draw (optional, can be moved to app core)
     let heap_buffer = HeapBuffer::new(fb_box);
     let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
 
@@ -399,23 +420,37 @@ fn main() -> ! {
         ).unwrap()
     };
 
-    let delay = Delay::new();
+    // Signal to app core that PSRAM is ready
+    PSRAM_READY.signal(());
 
+    // Spawn Conway update task on app core (core 1)
+    let mut cpu_control = CpuControl::new(peripherals.CPU_CTRL);
+    let _app_core = cpu_control.start_app_core(
+        unsafe { &mut APP_CORE_STACK },
+        move || {
+            // SAFETY: PSRAM_BUF_PTR and PSRAM_BUF_LEN are published before
+            let psram_ptr = unsafe { PSRAM_BUF_PTR };
+            let psram_len = unsafe { PSRAM_BUF_LEN };
+            // Wait until PSRAM is ready
+            PSRAM_READY.wait();
+            // Initialize and run Embassy executor on app core
+            static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+            let executor = EXECUTOR.init(Executor::new());
+            executor.run(|spawner| {
+                spawner.spawn(conway_task(psram_ptr, psram_len)).ok();
+            });
+        }
+    );
+
+    // Core 0: Only send DMA frames in a loop
     loop {
         info!("Drawing full frame now...");
-
-
-
-        // Chunked full-frame transfer
-        let safe_chunk_size = 320 * 240 *2 ;
+        let safe_chunk_size = 320 * 240 * 2;
         let frame_bytes = display_width * display_height * 2;
-        let len = safe_chunk_size.min(frame_bytes );
+        let len = safe_chunk_size.min(frame_bytes);
         dma_tx.set_length(len);
         match dpi.send(false, dma_tx) {
             Ok(xfer) => {
-                // update_game_of_life(&*game_grid, &mut *next_grid);
-                // core::mem::swap(&mut game_grid, &mut next_grid);
-                // draw_grid(&mut frame_buf, &*game_grid).unwrap();
                 let (res, new_dpi, new_dma_tx) = xfer.wait();
                 dpi = new_dpi;
                 dma_tx = new_dma_tx;
@@ -429,5 +464,36 @@ fn main() -> ! {
                 dma_tx = new_dma_tx;
             }
         }
+    }
+}
+
+// Conway update task running on core 1
+#[embassy_executor::task]
+async fn conway_task(psram_ptr: *mut u8, psram_len: usize) {
+    // Reconstruct the framebuffer and game grid
+    // LCD_BUFFER_SIZE and GRID_WIDTH/HEIGHT are const
+    let fb: &mut [Rgb565; LCD_BUFFER_SIZE] = unsafe {
+        &mut *(psram_ptr as *mut [Rgb565; LCD_BUFFER_SIZE])
+    };
+    let mut game_grid = Box::new([[0u8; GRID_WIDTH]; GRID_HEIGHT]);
+    let mut next_grid = Box::new([[0u8; GRID_WIDTH]; GRID_HEIGHT]);
+    // Randomize grid (no hardware RNG on core 1, just use some seed)
+    let mut seed: u32 = 0x12345678;
+    for y in 0..GRID_HEIGHT {
+        for x in 0..GRID_WIDTH {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            game_grid[y][x] = if (seed & 1) == 1 { 1 } else { 0 };
+        }
+    }
+    let mut fb_box: Box<[Rgb565; LCD_BUFFER_SIZE]> = Box::new([Rgb565::BLACK; LCD_BUFFER_SIZE]);
+    let fb_ptr: *mut Rgb565 = fb_box.as_mut_ptr();
+    let heap_buffer = HeapBuffer::new(fb_box);
+    let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
+    let mut ticker = Ticker::every(embassy_time::Duration::from_millis(33));
+    loop {
+        update_game_of_life(&*game_grid, &mut *next_grid);
+        core::mem::swap(&mut game_grid, &mut next_grid);
+        draw_grid(&mut frame_buf, &*game_grid).ok();
+        ticker.next().await;
     }
 }
