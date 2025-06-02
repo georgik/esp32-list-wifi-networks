@@ -92,6 +92,30 @@ impl<C: PixelColor, const N: usize> FrameBufferBackend for HeapBuffer<C, N> {
     }
 }
 
+/// FrameBufferBackend wrapper for a PSRAM-backed [Rgb565; N] slice.
+pub struct PSRAMFrameBuffer<'a> {
+    buf: &'a mut [Rgb565; LCD_BUFFER_SIZE],
+}
+
+impl<'a> PSRAMFrameBuffer<'a> {
+    pub fn new(buf: &'a mut [Rgb565; LCD_BUFFER_SIZE]) -> Self {
+        Self { buf }
+    }
+}
+
+impl<'a> FrameBufferBackend for PSRAMFrameBuffer<'a> {
+    type Color = Rgb565;
+    fn set(&mut self, index: usize, color: Self::Color) {
+        self.buf[index] = color;
+    }
+    fn get(&self, index: usize) -> Self::Color {
+        self.buf[index]
+    }
+    fn nr_elements(&self) -> usize {
+        LCD_BUFFER_SIZE
+    }
+}
+
 const GRID_WIDTH: usize = 70;
 const GRID_HEIGHT: usize = 70;
 
@@ -128,7 +152,7 @@ fn update_game_of_life(
 
 
 use esp_hal::rng::Rng;
-use esp_hal::system::{CpuControl, Stack};
+use esp_hal::system::{Cpu, CpuControl, Stack};
 
 fn randomize_grid(rng: &mut Rng, grid: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT]) {
     for y in 0..GRID_HEIGHT {
@@ -401,13 +425,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut rng = Rng::new(peripherals.RNG);
     randomize_grid(&mut rng, &mut *game_grid);
 
-    // HeapBuffer and FrameBuf for initial draw (optional, can be moved to app core)
-    let heap_buffer = HeapBuffer::new(fb_box);
-    let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
-
-    update_game_of_life(&*game_grid, &mut *next_grid);
-    core::mem::swap(&mut game_grid, &mut next_grid);
-    draw_grid(&mut frame_buf, &*game_grid).unwrap();
+    // The PSRAM framebuffer is now used for drawing in the Conway task.
 
     info!("Entering main loop...");
 
@@ -444,7 +462,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Core 0: Only send DMA frames in a loop
     loop {
-        info!("Drawing full frame now...");
+        println!("Core {}: Pushing DMA data...", Cpu::current() as usize);
         let safe_chunk_size = 320 * 240 * 2;
         let frame_bytes = display_width * display_height * 2;
         let len = safe_chunk_size.min(frame_bytes);
@@ -471,7 +489,6 @@ async fn main(spawner: Spawner) -> ! {
 #[embassy_executor::task]
 async fn conway_task(psram_ptr: *mut u8, psram_len: usize) {
     // Reconstruct the framebuffer and game grid
-    // LCD_BUFFER_SIZE and GRID_WIDTH/HEIGHT are const
     let fb: &mut [Rgb565; LCD_BUFFER_SIZE] = unsafe {
         &mut *(psram_ptr as *mut [Rgb565; LCD_BUFFER_SIZE])
     };
@@ -485,16 +502,15 @@ async fn conway_task(psram_ptr: *mut u8, psram_len: usize) {
             game_grid[y][x] = if (seed & 1) == 1 { 1 } else { 0 };
         }
     }
-    let mut fb_box: Box<[Rgb565; LCD_BUFFER_SIZE]> = Box::new([Rgb565::BLACK; LCD_BUFFER_SIZE]);
-    let fb_ptr: *mut Rgb565 = fb_box.as_mut_ptr();
-    let heap_buffer = HeapBuffer::new(fb_box);
-    let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
-    let mut ticker = Ticker::every(embassy_time::Duration::from_millis(33));
+    let mut frame_buf = FrameBuf::new(PSRAMFrameBuffer::new(fb), LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
+    // let mut ticker = Ticker::every(embassy_time::Duration::from_millis(100));
     loop {
-        println!("Conway update task running...");
+        // Log message with core number
+        println!("Core {}: Updating Game of Life grid...", Cpu::current() as usize);
+
         update_game_of_life(&*game_grid, &mut *next_grid);
         core::mem::swap(&mut game_grid, &mut next_grid);
         draw_grid(&mut frame_buf, &*game_grid).ok();
-        ticker.next().await;
+        // ticker.next().await;
     }
 }
