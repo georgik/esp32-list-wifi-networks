@@ -89,8 +89,10 @@ impl<C: PixelColor, const N: usize> FrameBufferBackend for HeapBuffer<C, N> {
 const GRID_WIDTH: usize = 70;
 const GRID_HEIGHT: usize = 70;
 
-fn update_game_of_life(grid: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT]) {
-    let mut new_grid = [[0u8; GRID_WIDTH]; GRID_HEIGHT];
+fn update_game_of_life(
+    current: &[[u8; GRID_WIDTH]; GRID_HEIGHT],
+    next: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT],
+) {
     for y in 0..GRID_HEIGHT {
         for x in 0..GRID_WIDTH {
             let mut neighbors = 0;
@@ -102,21 +104,20 @@ fn update_game_of_life(grid: &mut [[u8; GRID_WIDTH]; GRID_HEIGHT]) {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
                     if nx >= 0 && nx < GRID_WIDTH as i32 && ny >= 0 && ny < GRID_HEIGHT as i32 {
-                        if grid[ny as usize][nx as usize] > 0 {
+                        if current[ny as usize][nx as usize] > 0 {
                             neighbors += 1;
                         }
                     }
                 }
             }
-            let cell = grid[y][x];
-            new_grid[y][x] = match (cell > 0, neighbors) {
+            let cell = current[y][x];
+            next[y][x] = match (cell > 0, neighbors) {
                 (true, 2) | (true, 3) => cell.saturating_add(1), // stay alive, age
                 (false, 3) => 1, // born
                 _ => 0, // dead
             };
         }
     }
-    *grid = new_grid;
 }
 
 
@@ -375,15 +376,17 @@ fn main() -> ! {
         }
     }
 
-    let mut game_grid = [[0u8; GRID_WIDTH]; GRID_HEIGHT];
+    let mut game_grid = Box::new([[0u8; GRID_WIDTH]; GRID_HEIGHT]);
+    let mut next_grid = Box::new([[0u8; GRID_WIDTH]; GRID_HEIGHT]);
     let mut rng = Rng::new(peripherals.RNG);
-    randomize_grid(&mut rng, &mut game_grid);
+    randomize_grid(&mut rng, &mut *game_grid);
 
     let heap_buffer = HeapBuffer::new(fb_box);
     let mut frame_buf = FrameBuf::new(heap_buffer, LCD_H_RES_USIZE.into(), LCD_V_RES_USIZE.into());
 
-    update_game_of_life(&mut game_grid);
-    draw_grid(&mut frame_buf, &game_grid).unwrap();
+    update_game_of_life(&*game_grid, &mut *next_grid);
+    core::mem::swap(&mut game_grid, &mut next_grid);
+    draw_grid(&mut frame_buf, &*game_grid).unwrap();
 
     info!("Entering main loop...");
 
@@ -396,11 +399,12 @@ fn main() -> ! {
         ).unwrap()
     };
 
+    let delay = Delay::new();
+
     loop {
         info!("Drawing full frame now...");
 
-        // update_game_of_life(&mut game_grid);
-        // draw_grid(&mut frame_buf, &game_grid).unwrap();
+
 
         // Chunked full-frame transfer
         let safe_chunk_size = 320 * 240 *2 ;
@@ -409,6 +413,9 @@ fn main() -> ! {
         dma_tx.set_length(len);
         match dpi.send(false, dma_tx) {
             Ok(xfer) => {
+                // update_game_of_life(&*game_grid, &mut *next_grid);
+                // core::mem::swap(&mut game_grid, &mut next_grid);
+                // draw_grid(&mut frame_buf, &*game_grid).unwrap();
                 let (res, new_dpi, new_dma_tx) = xfer.wait();
                 dpi = new_dpi;
                 dma_tx = new_dma_tx;
