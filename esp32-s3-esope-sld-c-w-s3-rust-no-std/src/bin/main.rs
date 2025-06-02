@@ -286,8 +286,6 @@ fn main() -> ! {
     }
 
     info!("Entering main loop...");
-    // small timer to throttle between DMA chunks
-    let delay = Delay::new();
 
     // Configure a single DMA buffer over the whole PSRAM region with 64‑byte bursts
     let mut dma_tx: DmaTxBuf = unsafe {
@@ -303,26 +301,23 @@ fn main() -> ! {
 
         // Chunked full-frame transfer
         let safe_chunk_size = 320 * 240 *2 ;
-        let mut offset = 0;
-        while offset < frame_bytes {
-            let len = safe_chunk_size.min(frame_bytes - offset);
-            dma_tx.set_length(len);
-            match dpi.send(false, dma_tx) {
-                Ok(xfer) => {
-                    let (res, new_dpi, new_dma_tx) = xfer.wait();
-                    dpi = new_dpi;
-                    dma_tx = new_dma_tx;
-                    if let Err(e) = res {
-                        error!("DMA transfer error: {:?}", e);
-                    }
-                }
-                Err((e, new_dpi, new_dma_tx)) => {
-                    error!("DMA send error: {:?}", e);
-                    dpi = new_dpi;
-                    dma_tx = new_dma_tx;
+
+        let len = safe_chunk_size.min(frame_bytes );
+        dma_tx.set_length(len);
+        match dpi.send(false, dma_tx) {
+            Ok(xfer) => {
+                let (res, new_dpi, new_dma_tx) = xfer.wait();
+                dpi = new_dpi;
+                dma_tx = new_dma_tx;
+                if let Err(e) = res {
+                    error!("DMA transfer error: {:?}", e);
                 }
             }
-            offset += len;
+            Err((e, new_dpi, new_dma_tx)) => {
+                error!("DMA send error: {:?}", e);
+                dpi = new_dpi;
+                dma_tx = new_dma_tx;
+            }
         }
     }
 }
