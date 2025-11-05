@@ -1,6 +1,11 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+// Add ESP-IDF App Descriptor - required for flashing
+esp_bootloader_esp_idf::esp_app_desc!();
+
 use embassy_executor::Spawner;
 
 #[panic_handler]
@@ -8,29 +13,22 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 use embassy_time::{Duration, Timer};
-use esp_backtrace as _;
+use esp_alloc as _;
 use esp_hal::{clock::CpuClock, rng::Rng, timer::timg::TimerGroup};
-use esp_wifi::{
-    EspWifiController,
-    init,
-    wifi::{ClientConfiguration, Configuration, WifiController},
-};
+use esp_radio::wifi::{ClientConfig, ModeConfig, ScanConfig, WifiController};
 use log::info;
 
-extern crate alloc;
-use alloc::string::String;
-
-// When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
 macro_rules! mk_static {
-    ($t:ty,$val:expr) => {{
+    ($t:ty, $val:expr) => {{
         static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
+        #[allow(unsafe_code, unused_unsafe)]
+        unsafe {
+            STATIC_CELL.init_with(|| $val)
+        }
     }};
 }
 
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
     info!("Logger initialized");
@@ -44,23 +42,23 @@ async fn main(spawner: Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     info!("Timer group created");
-    let rng = Rng::new(peripherals.RNG);
+    let _rng = Rng::new();
     info!("RNG created");
 
+    // Initialize Wi-Fi controller with esp-rtos
+    esp_rtos::start(timg0.timer0);
+
     info!("Initializing WiFi...");
-    let esp_wifi_ctrl = &*mk_static!(
-        EspWifiController<'static>,
-        init(timg0.timer0, rng.clone()).unwrap()
+    let radio_init = &*mk_static!(
+        esp_radio::Controller<'static>,
+        esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller")
     );
     info!("WiFi controller initialized");
 
-    let (controller, _interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
+    let (controller, _interfaces) =
+        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
     info!("WiFi interface created");
-
-    // For ESP32-S3, we use SystemTimer
-    use esp_hal::timer::systimer::SystemTimer;
-    let systimer = SystemTimer::new(peripherals.SYSTIMER);
-    esp_hal_embassy::init(systimer.alarm0);
 
     spawner.spawn(wifi_scan_task(controller)).ok();
 
@@ -74,33 +72,35 @@ async fn main(spawner: Spawner) -> ! {
 async fn wifi_scan_task(mut controller: WifiController<'static>) {
     info!("Starting WiFi scan task");
     info!("Device capabilities: {:?}", controller.capabilities());
-    
-    // Set up the WiFi controller in station mode
-    let client_config = Configuration::Client(ClientConfiguration {
-        ssid: String::new(),
-        password: String::new(),
-        ..Default::default()
-    });
-    
-    controller.set_configuration(&client_config).unwrap();
-    
+
+    // Set WiFi to Station mode for scanning
+    let client_config = ModeConfig::Client(ClientConfig::default());
+    if let Err(e) = controller.set_config(&client_config) {
+        info!("Failed to set WiFi config: {:?}", e);
+        return;
+    }
+
     // Start WiFi
     info!("Starting WiFi...");
-    controller.start_async().await.unwrap();
+    if let Err(e) = controller.start_async().await {
+        info!("Failed to start WiFi: {:?}", e);
+        return;
+    }
     info!("WiFi started!");
 
     loop {
         info!("Performing WiFi scan...");
-        
+
         // Perform a scan for up to 16 networks
-        match controller.scan_n_async(16).await {
+        let scan_config = ScanConfig::default().with_max(16);
+        match controller.scan_with_config_async(scan_config).await {
             Ok(results) => {
                 info!("Found {} networks:", results.len());
                 for (i, ap) in results.iter().enumerate() {
                     info!(
-                        "  {}: SSID: {}, Signal: {:?}, Auth: {:?}, Channel: {}",
+                        "  {}: SSID: {}, Signal: {}, Auth: {:?}, Channel: {}",
                         i + 1,
-                        ap.ssid.as_str(),
+                        ap.ssid,
                         ap.signal_strength,
                         ap.auth_method,
                         ap.channel
@@ -111,7 +111,7 @@ async fn wifi_scan_task(mut controller: WifiController<'static>) {
                 info!("WiFi scan failed: {:?}", e);
             }
         }
-        
+
         // Wait 10 seconds before next scan
         Timer::after(Duration::from_millis(10000)).await;
     }

@@ -48,8 +48,8 @@ This project uses:
 - `embassy-executor` for async task execution
 - `embassy-time` for async timers
 - `esp-hal-embassy` for Embassy integration with ESP32-S3
-- `esp-wifi` with Embassy support for WiFi functionality
-- `esp-hal` 1.0.0-beta.1 for hardware abstraction
+- `esp-radio` with Embassy support for WiFi functionality
+- `esp-hal` 1.0.0 for hardware abstraction
 
 ## Differences from no-std version
 
