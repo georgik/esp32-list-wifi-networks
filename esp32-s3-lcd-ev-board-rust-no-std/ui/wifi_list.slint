@@ -1,0 +1,148 @@
+export component WifiListWindow inherits Window {
+    title: "WiFi Scanner";
+    width: 480px;
+    height: 480px;
+
+    in property <string> status_text: "Scanning for networks...";
+    in property <[string]> access_points;
+    callback connect(index: int);
+
+    // Background
+    Rectangle {
+        background: #f0f0f0;
+
+        // Main container
+        Rectangle {
+            x: 10px;
+            y: 10px;
+            width: 460px;
+            height: 460px;
+            background: white;
+            border-radius: 8px;
+
+            // Title bar
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 460px;
+                height: 60px;
+                background: #1a237e;
+                border-radius: 8px;
+
+                Text {
+                    text: "WiFi Scanner";
+                    x: 0px;
+                    y: 15px;
+                    width: 460px;
+                    color: white;
+                    font-size: 20px;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.status_text;
+                    x: 0px;
+                    y: 35px;
+                    width: 460px;
+                    color: #b3e5fc;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // Network list
+            Rectangle {
+                visible: root.access_points.length > 0;
+                x: 10px;
+                y: 70px;
+                width: 440px;
+                height: 350px;
+                background: #fafafa;
+                border-radius: 6px;
+
+                for i in root.access_points.length : Rectangle {
+                    y: i * 55px;
+                    x: 5px;
+                    width: 430px;
+                    height: 50px;
+                    background: Math.mod(i, 2) == 0 ? #f5f5f5 : #ffffff;
+                    border-color: #e0e0e0;
+                    border-width: 1px;
+                    border-radius: 6px;
+
+                    Text {
+                        text: root.access_points[i];
+                        x: 10px;
+                        y: 5px;
+                        width: 410px;
+                        height: 40px;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    TouchArea {
+                        x: 0px;
+                        y: 0px;
+                        width: 430px;
+                        height: 50px;
+                        clicked => root.connect(i);
+                    }
+                }
+            }
+
+            // Empty state
+            Rectangle {
+                visible: root.access_points.length == 0;
+                x: 10px;
+                y: 70px;
+                width: 440px;
+                height: 350px;
+                background: #fafafa;
+                border-radius: 6px;
+
+                Text {
+                    text: "No networks found";
+                    x: 0px;
+                    y: 150px;
+                    width: 440px;
+                    color: #757575;
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Scanning will continue...";
+                    x: 0px;
+                    y: 175px;
+                    width: 440px;
+                    color: #9e9e9e;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // Footer
+            Rectangle {
+                x: 10px;
+                y: 430px;
+                width: 440px;
+                height: 20px;
+                background: #263238;
+                border-radius: 8px;
+
+                Text {
+                    text: "Tap any network to connect • Auto-refresh every 5s";
+                    x: 0px;
+                    y: 0px;
+                    width: 440px;
+                    height: 20px;
+                    color: #b0bec5;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
